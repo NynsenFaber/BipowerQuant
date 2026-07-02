@@ -1,0 +1,11 @@
+[2026-07-02 21:22:32] XGBoost (Full Matrix)
+Accuracy: 0.4921 | F1: 0.3432 | ROC-AUC: 0.4872
+Feature Importances:
+Realized Variance: 0.2476
+Bipower Variation: 0.2599
+Jumps: 0.1924
+Order Flow Imbalance: 0.3001
+--------------------------------------------------
+[2026-07-02 21:23:02] Logistic Regression (Baseline)
+Accuracy: 0.5335 | F1: 0.5562 | ROC-AUC: 0.5343
+--------------------------------------------------

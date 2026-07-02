@@ -1,11 +1,22 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+# Compiled C++ extensions
+*.so
+*.dylib
+*.pyd
 
-# Virtual environments
-.venv
-data/
+# CMake build directory and artifacts
+build/
+compile_commands.json
+
+# Python virtual environments and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Local data and logs
+training_logs.txt
+*.csv
+*.parquet
+
+.DS_Store
+
+TODO.md
