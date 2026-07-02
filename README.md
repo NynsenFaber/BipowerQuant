@@ -11,6 +11,7 @@ By isolating the continuous volatility of an asset from sudden market shocks (ju
 The core assumption of this engine is that the high-frequency log-price $p_t$ of an asset does not follow a simple random walk, but rather an Ito Jump-Diffusion process. This allows us to model both the standard market noise and the sudden structural breaks caused by institutional block orders or macroeconomic news.
 
 The process is defined as:
+
 $$dp_t = \mu_t dt + \sigma_t dW_t + J_t dN_t$$
 
 Where:
@@ -23,14 +24,17 @@ To utilize this continuous-time process in a discrete Machine Learning model, th
 
 **1. Realized Variance (Total Risk):**
 Realized Variance captures the total quadratic variation of the asset, absorbing both the smooth diffusion and the discrete jumps.
+
 $$RV_t = \sum_{i=1}^{M} r_{t,i}^2$$
 
 **2. Bipower Variation (Continuous Risk):**
 Bipower Variation is a robust estimator that mathematically filters out the jumps. By multiplying adjacent absolute returns, the probability of two massive jumps occurring in consecutive microscopic ticks approaches zero, isolating the continuous variance ($\sigma_t$).
+
 $$BPV_t = \frac{\pi}{2} \sum_{i=2}^{M} |r_{t,i}| |r_{t,i-1}|$$
 
 **3. Jump Component (Discrete Shocks):**
 By subtracting the continuous risk from the total risk, we isolate the exact magnitude of the market shocks occurring within the window.
+
 $$J_t = \max(RV_t - BPV_t, 0)$$
 
 ## 2. Microstructure Features
@@ -114,16 +118,24 @@ When evaluating the predictive performance of the models, we rely on three stand
 
 ### 1. Accuracy
 The ratio of correctly predicted observations (both up-ticks and down-ticks) to the total observations. While intuitive, it can be misleading if the market regime is heavily skewed in one direction.
+
 $$ \text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN} $$
+
 *(Where TP = True Positives, TN = True Negatives, FP = False Positives, FN = False Negatives)*
 
 ### 2. F1-Score
 The harmonic mean of Precision and Recall. It is a strictly stricter metric than accuracy and is highly valuable when dealing with asymmetrical market conditions or imbalanced target distributions. 
+
 $$ \text{F1-Score} = 2 \times \frac{\text{Precision} \times \text{Recall}}{\text{Precision} + \text{Recall}} $$
+
 *   **Precision:** Out of all the times the model predicted the price would go up, how often was it right?
+
 $$ \text{Precision} = \frac{TP}{TP + FP} $$
+
 *   **Recall:** Out of all the actual times the price went up, how many did the model manage to catch?
+
 $$ \text{Recall} = \frac{TP}{TP + FN} $$
+
 ### 3. ROC-AUC (Receiver Operating Characteristic - Area Under Curve)
 This measures the model's ability to distinguish between classes across all possible classification thresholds, rather than just a fixed 50% cutoff. 
 *   An **AUC of 0.5** means the model has no class separation capacity whatsoever (a coin flip).
