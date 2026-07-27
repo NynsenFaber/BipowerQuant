@@ -9,3 +9,16 @@ Order Flow Imbalance: 0.3001
 [2026-07-02 21:23:02] Logistic Regression (Baseline)
 Accuracy: 0.5335 | F1: 0.5562 | ROC-AUC: 0.5343
 --------------------------------------------------
+[2026-07-26 23:10:34] XGBoost (Contextual Matrix + Fee Threshold)
+Accuracy: 0.7711 | F1: 0.1194 | ROC-AUC: 0.4980
+Target: forward 1m return > 0.0500% | Positive rate (train): 6.80% | scale_pos_weight: 13.704
+Precision: 0.0934 | Recall: 0.1655
+Feature Importances:
+Realized Variance: 0.0725
+Bipower Variation: 0.1605
+Jumps: 0.1369
+Order Flow Imbalance: 0.2338
+5m Return: 0.1274
+Vol-Adjusted OFI: 0.1355
+Signed Jumps: 0.1334
+--------------------------------------------------
