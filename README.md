@@ -4,6 +4,8 @@ This repository contains a high-performance predictive engine designed to foreca
 
 By isolating the continuous volatility of an asset from sudden market shocks (jumps) via Bipower Variation, the model feeds purified stochastic signals—alongside microstructural Order Flow Imbalance (OFI)—into an Extreme Gradient Boosting (XGBoost) classifier.
 
+Three models are benchmarked against the same profit-threshold target: a **Logistic Regression** on OFI alone, **XGBoost** on the seven-feature stochastic matrix, and **PatchTST** — a channel-independent patch Transformer that reads the raw 300-bar lookback instead of its aggregates (see [§4](#4-the-patchtst-sequence-baseline) and [§8](#8-training-and-running-patchtst)).
+
 
 
 ## 1. Mathematical Framework
@@ -81,7 +83,80 @@ $$y_t = \begin{cases} 1 & \text{if } \frac{p_{t+60}}{p_t} - 1 > 0.0005 \\ 0 & \t
 Every down move, flat move, and unprofitable up move collapses into class `0`. This is a deliberately harsh relabelling: on the May 2026 BTC/USDT sample it drops the positive class from roughly 50% to **6.8%**, converting a balanced problem into a rare-event detection problem. `scale_pos_weight` is consequently recomputed from the actual training split at every run rather than assumed to be near 1.0.
 
 
-## 4. Pipeline & Technology Stack
+## 4. The PatchTST Sequence Baseline
+
+The logistic and XGBoost models both see the same thing: **seven numbers per window**. $RV_t$, $BPV_t$, $OFI_t$ and the contextual features are all *sums* over the 5-minute lookback, and a sum is order-blind. A window where a 40 BTC sell wall hit in the first ten seconds and one where it hit in the last ten produce identical feature vectors, even though only the second is still moving the book when the prediction is made.
+
+PatchTST ([Nie et al., ICLR 2023](https://arxiv.org/abs/2211.14730)) is the natural way to give the model back that ordering without abandoning the jump-diffusion framing. It is added here as a third baseline solving **the identical classification problem** — same 5-minute lookback, same 1-minute horizon, same 5 bp fee threshold, same target definition — differing only in what it reads.
+
+### 4.1 From scalars to channels
+
+Instead of the aggregated 7-vector, PatchTST consumes the raw 300 one-second bars of the lookback as $M = 6$ parallel univariate channels:
+
+| Channel | Definition | Relation to the C++ engine |
+| :--- | :--- | :--- |
+| `log_return` | $r_t = \log p_t - \log p_{t-1}$ | the signed increments the aggregates discard |
+| `realized_var` | $r_t^2$ | $\sum_{\text{window}} = RV_t$ |
+| `bipower` | $\frac{\pi}{2}\lvert r_t\rvert\lvert r_{t-1}\rvert$ | $\sum_{\text{window}} = BPV_t$ |
+| `ofi` | signed traded volume | $\sum_{\text{window}} = OFI_t$ |
+| `log_volume` | $\log(1 + q_t)$ | — |
+| `log_trades` | $\log(1 + n_t)$ | — |
+
+Channels 2–4 are exactly the per-bar terms `math_engine.hpp` accumulates — verified numerically to $\sim10^{-15}$ against `bipower_core`. **The model is therefore not given different information; it is given the same information un-summed.** Attention across patches can learn a time-weighted, non-linear alternative to $\sum r_{t,i}^2$, and it can recover the plain sum exactly if that is genuinely optimal.
+
+### 4.2 Patching
+
+A single second carries no more meaning than a single character does in a sentence, and 300 tokens of self-attention is $O(300^2)$ per channel. Patching fixes both. The lookback is cut into overlapping sub-series of length $P = 16$ bars with stride $S = 8$:
+
+$$N = \left\lfloor \frac{L - P}{S} \right\rfloor + 2 = \left\lfloor \frac{300 - 16}{8} \right\rfloor + 2 = 37$$
+
+(the $+2$ accounts for the paper's end-padding, which repeats the final value $S$ times). Each token is now a 16-second sub-series with local semantics, and the attention map shrinks from $300^2$ to $37^2$ — a **66×** reduction in attention cost at unchanged look-back length.
+
+### 4.3 Channel independence
+
+All six channels share one set of Transformer weights and are pushed through the encoder as independent univariate series, folding $M$ into the batch dimension as $(B \cdot M, N, D)$. Per the paper's ablation (Table 7) this beats channel-mixing consistently, for reasons that apply with unusual force here: mixing lets a noisy channel project its noise onto every other channel in the embedding space, and order-flow data is mostly noise. Cross-channel information is not lost — it is recombined in the head.
+
+### 4.4 Instance normalisation, and putting the scale back
+
+Each window/channel is standardised to zero mean and unit variance before patching. This is what makes the model survive the volatility regime shifts that a month of crypto tape is made of — a quiet Tuesday and a liquidation cascade become comparable inputs.
+
+But it also deletes precisely what this problem cares about: *how* volatile and *how* imbalanced the window was. So the discarded statistics are standardised and concatenated back into the classification head:
+
+$$\text{aux}_t = \left[\ \mu_c(t),\ \log(\sigma_c(t) + \epsilon)\ \right]_{c=1..M} \in \mathbb{R}^{12}$$
+
+These 12 numbers are close to the tabular feature set by construction — $\mu$ of `log_return` is the 5-minute return divided by 300, and $\mu$ of `realized_var` is exactly $RV_t / 300$ — so **nothing the trees had access to is withheld from the Transformer.** Set `USE_SCALE_FEATURES = False` in the notebook to ablate it and see how much of any lift is the sequence and how much is the aggregates.
+
+### 4.5 Classification head and loss
+
+The paper's `Flatten + Linear → T future values` becomes `Flatten + Linear → 1 logit`, trained with
+
+$$\mathcal{L} = \text{BCEWithLogits}\left(\hat{y}, y;\ w^+ = \frac{n^-}{n^+}\right)$$
+
+where $w^+$ is computed from the actual training split — the direct analogue of XGBoost's `scale_pos_weight`, and equally necessary given a ~7% positive class.
+
+Default size: 3 encoder layers, $D = 64$, $H = 4$ heads, $F = 128$, dropout 0.2 — **118,093 parameters**, roughly 0.5 MB on disk. Deliberately small: with an ROC-AUC hovering near 0.5 across every run so far, the failure mode to fear is a model with enough capacity to memorise 22k autocorrelated windows.
+
+### 4.6 Computational design
+
+Consecutive windows share 299 of their 300 bars, so materialising the training tensor is the obvious trap: $n_{\text{windows}} \times 6 \times 300$ float32s is **19.3 GB for a month** of data. Nothing in this pipeline ever builds it.
+
+| Concern | Approach |
+| :--- | :--- |
+| **Window memory** | the $(6, n_{\text{bars}})$ channel matrix lives on the device *once* — **64 MB** for a month, a **300×** reduction — and every batch is one gather, `channels[:, starts[:, None] + arange(300)]` |
+| **Data loading** | no `DataLoader`, no workers, no per-batch host→device copies — the whole series is already resident |
+| **Attention** | `F.scaled_dot_product_attention`, so PyTorch selects the fused Flash / memory-efficient kernel |
+| **Precision** | automatic mixed precision — bf16 where supported, fp16 + loss scaling on T4 |
+| **Ingestion** | one streaming Polars pass folds 72M ticks into 2.7M second-bars, cached as a ~30 MB `.npz` so no later run re-reads the 5 GB CSV |
+| **Autocorrelation** | `TRAIN_STRIDE` thins training windows (validation and test always keep every window) |
+
+### 4.7 Two deliberate differences from the XGBoost pipeline
+
+Both are documented rather than silently applied, because they affect how the numbers compare:
+
+1. **Complete 1-second grid.** `ml_matrix.py` uses `group_by_dynamic`, which emits bars only for seconds that contain trades — so its "60-bar" horizon is not always 60 seconds. `sequence_matrix.py` reindexes onto a gap-free grid with forward-filled prices and zero volume. On BTC/USDT this matters more than expected: **roughly one second in five contains no trade at all.** A patch model needs uniform time spacing to be meaningful, so this is the Phase 5 grid fix, applied here first.
+2. **A purged 70/10/20 split.** The trees used a plain chronological 80/20. A neural network needs a validation split for early stopping, so 10% is carved out of the *training* portion — the test split is still the final 20% of the period. Additionally, $L + H - 1 = 359$ windows are dropped before each boundary: without that purge the last training windows are labelled by price moves that fall *inside* the next split's lookback. (Combined with difference 1, the test windows are not bar-for-bar the ones XGBoost saw, so treat the comparison as close rather than exact until `ml_matrix.py` is moved onto the same grid.)
+
+## 5. Pipeline & Technology Stack
 
 To handle billions of ticks without memory overflows, the project implements a polyglot out-of-core architecture.
 
@@ -91,9 +166,10 @@ To handle billions of ticks without memory overflows, the project implements a p
 | **Math Engine** | C++20 | Zero-overhead arrays and loop optimizations to calculate rolling stochastic metrics. |
 | **Interoperability** | `pybind11` (CMake) | Compiles the C++ engine into a native Python module (`bipower_core`) for seamless pipeline integration. |
 | **Machine Learning** | XGBoost | Iterative tree boosting (`xgb.train`) trained sequentially on streaming data chunks. |
+| **Sequence Model** | PyTorch | PatchTST — a channel-independent patch Transformer reading the raw 300-bar lookback. Trained on a Colab GPU, scored locally from an exported checkpoint. |
 | **Baseline Benchmark** | Scikit-Learn | A standard Logistic Regression trained exclusively on OFI to prove the alpha generated by the jump-diffusion metrics. |
 
-## 4. Data Source
+## 6. Data Source
 
 To replicate the training environment, you will need high-frequency tick data. The pipeline is built to natively process Binance public trade data. 
 
@@ -103,7 +179,9 @@ You can download the exact dataset used in this project directly from the Binanc
 
 Once downloaded, place the file (or the extracted CSV) into your project directory and ensure the `FILE_PATH` variable in `python/data_feeder.py` points to it.
 
-## 6. Repository Structure
+*(The PatchTST notebook downloads this archive directly inside Colab — see §8 — so no upload is needed to train.)*
+
+## 7. Repository Structure
 
 The codebase is strictly divided between low-level performance execution and high-level pipeline orchestration:
 
@@ -117,7 +195,80 @@ The codebase is strictly divided between low-level performance execution and hig
 *   **`train_baseline.py`**: Trains a Scikit-Learn Logistic Regression model exclusively on the OFI feature to establish a foundational directional benchmark.
 *   **`train_xgboost.py`**: Trains the XGBoost tree classifier on the full stochastic jump-diffusion matrix, exporting feature importances to compare against the linear baseline. 
 
+### `python/` (PatchTST Sequence Pipeline)
+*   **`sequence_matrix.py`**: The sequence counterpart to `ml_matrix.py`. Streams ticks into a gap-free 1-second bar grid, derives the six per-bar channels, applies the identical fee-threshold target, and produces purged chronological splits. Depends only on Polars and NumPy — **not** on `bipower_core` — which is what lets the exact same code run inside a Colab runtime where the C++ extension was never compiled.
+*   **`patchtst_model.py`**: The network (patching, channel-independent encoder, instance normalisation, classification head), the `WindowBatcher` that cuts overlapping windows out of a device-resident channel matrix, checkpoint I/O, and the shared metric helpers.
+*   **`patchtst_train.py`**: The training loop — AdamW with cosine schedule and warmup, mixed precision, gradient clipping, ROC-AUC early stopping with best-weight restore. Deliberately kept out of the notebook so the code that produced a checkpoint is version controlled beside the model.
+*   **`eval_patchtst.py`**: Loads an exported checkpoint, rebuilds the identical window population from the local CSV, scores the held-out split, and appends to `training_logs.txt`.
+
+### `notebooks/` & `weights/`
+*   **`notebooks/train_patchtst_colab.ipynb`**: The GPU training driver — see §8.
+*   **`weights/`**: Where downloaded checkpoints go. See [`weights/README.md`](weights/README.md) for the checkpoint layout.
+
 *(Note: Training scripts automatically append timestamped classification metrics—Accuracy, F1-Score, and ROC-AUC—to a local `training_logs.txt` file for historical tracking).*
+
+## 8. Training and Running PatchTST
+
+Training happens on a free Colab GPU; evaluation happens locally against the exported checkpoint. The checkpoint carries its own data recipe, so the local run reproduces the notebook's window population exactly — or refuses and tells you why.
+
+### Step 1 — Push the branch
+
+The notebook pulls the model code from the repository rather than carrying a copy, so whatever branch holds `python/patchtst_model.py` must exist on the remote:
+
+```bash
+git push -u origin add-patchTST
+```
+
+*(No remote? Skip it — the notebook's markdown documents the fallback: upload `sequence_matrix.py`, `patchtst_model.py`, `patchtst_train.py` and `data_feeder.py` through the Colab file browser instead.)*
+
+### Step 2 — Train in Colab
+
+Open [`notebooks/train_patchtst_colab.ipynb`](notebooks/train_patchtst_colab.ipynb) in Google Colab and set **Runtime → Change runtime type → T4 GPU**. Then run the cells in order:
+
+| Cell | What it does |
+| :--- | :--- |
+| **0** | Confirms a GPU is attached and enables TF32 |
+| **1** | Clones this repository, sets `BRANCH`, installs Polars |
+| **2** | Downloads `BTCUSDT-trades-2026-05.zip` straight from the Binance archive (~1.5 GB) and optionally mounts Drive |
+| **3** | **The configuration cell** — every knob in one place |
+| **4** | Streams the CSV into 1-second bars, caching them to `.npz` |
+| **5** | Builds batchers and the model; prints parameter count and resident memory |
+| **5b** | **Throughput probe** — times real training steps and estimates the epoch cost *before* you commit a session to it |
+| **6** | Trains, with early stopping on validation ROC-AUC |
+| **7** | Plots training loss and validation ROC-AUC |
+| **8** | Scores the held-out test split, with a threshold sweep |
+| **9** | Saves the checkpoint and triggers a browser download |
+
+Start with `HOURS = 8.0` — that reproduces the exact window population the July 26 XGBoost run used, which makes the first comparison apples-to-apples and finishes in minutes. Then set `HOURS = None` for the full month, raising `TRAIN_STRIDE` to 4–8 so an epoch stays affordable.
+
+### Step 3 — Bring the weights home
+
+Cell 9 calls `files.download(...)`, which drops a `.pt` (~0.5 MB) into your browser's download folder, and also copies it to Drive if you mounted it. Move it into `weights/`:
+
+```bash
+mv ~/Downloads/patchtst_BTCUSDT_2026-05_8h.pt weights/
+```
+
+### Step 4 — Run the experiment locally
+
+```bash
+uv sync                                                        # first time: pulls torch
+cd python
+python eval_patchtst.py --weights ../weights/patchtst_BTCUSDT_2026-05_8h.pt
+```
+
+The script prints the metrics table plus a threshold sweep, and appends a row to `python/training_logs.txt` in the same format as the other baselines.
+
+| Flag | Purpose |
+| :--- | :--- |
+| `--device mps` | Apple Silicon GPU (verified to give identical results to CPU) |
+| `--bars-cache ../data/bars.npz` | build the bar series once, reuse it on every later run |
+| `--split val` | score the validation split instead of the test split |
+| `--threshold 0.7` | change the probability cut-off for the hard label |
+| `--save-predictions probs.npy` | dump per-window probabilities for further analysis |
+| `--allow-mismatch` | score anyway when the local data does not match the checkpoint |
+
+**On the mismatch guard.** `eval_patchtst.py` compares the locally rebuilt bar count, first timestamp and split sizes against what the checkpoint recorded. If they differ — a different month, a truncated CSV, an edited `sequence_matrix.py` — it stops rather than reporting a number against a different window population. That is the failure mode most likely to produce a fake result, so it is an error by default rather than a warning.
 
 ## Current Training Results
 
@@ -149,6 +300,26 @@ The contextual features did not rescue the signal. Compared to the July 2 run, f
 *   **5m Return:** 0.1274
 *   **Realized Variance:** 0.0725
 
+### Phase 5: PatchTST — implemented, not yet trained
+
+The sequence pipeline described in §4 is complete and verified end to end (channels reconstruct the C++ aggregates to $10^{-15}$; checkpoints round-trip; CPU, MPS and CUDA agree), but **no training run has been scored yet.** This table is a placeholder to be filled from `python/training_logs.txt` after the first Colab run:
+
+| Metric | PatchTST | Reference |
+| :--- | :--- | :--- |
+| **Accuracy** | — | compare against the always-`0` accuracy the script prints |
+| **Precision** | — | compare against the test-set base rate, not against 0.5 |
+| **Recall** | — | — |
+| **F1-Score** | — | — |
+| **ROC-AUC** | — | 0.5000 is a coin flip |
+
+**Read the eventual result the same way the Phase 4 result was read.** PatchTST has ~118k parameters against XGBoost's few hundred tree splits, so it has considerably more room to fit noise. Three things separate a finding from an artefact here:
+
+*   **Precision above the base rate**, which the evaluation script prints side by side for exactly this reason.
+*   **ROC-AUC meaningfully above 0.52** — and on a single 8-hour block, even that is within sampling noise given ~1,700 effectively-independent windows.
+*   **Consistency across folds.** One good chronological split is not evidence. The walk-forward validation in Phase 5 of the roadmap applies to this model at least as much as to the trees.
+
+The validation curve plotted by the notebook is the first diagnostic to look at: if validation ROC-AUC peaks in the first few epochs and decays while training loss keeps falling, the model is memorising overlapping windows, and the answer is a larger `TRAIN_STRIDE` or more tape — not a bigger network.
+
 ### History
 
 | Date | Model | Accuracy | F1-Score | ROC-AUC |
@@ -156,6 +327,7 @@ The contextual features did not rescue the signal. Compared to the July 2 run, f
 | Jul 2 | Logistic Regression (OFI only, directional target) | 0.5335 | 0.5562 | 0.5343 |
 | Jul 2 | XGBoost (4-feature matrix, directional target) | 0.4921 | 0.3432 | 0.4872 |
 | Jul 26 | XGBoost (7-feature matrix, fee threshold) | 0.7711 | 0.1194 | 0.4980 |
+| — | PatchTST (6-channel sequence, fee threshold) | *pending* | *pending* | *pending* |
 
 Note that the July 2 and July 26 rows are **not directly comparable** — they are scored against different target definitions on different class balances. The July 2 logistic baseline remains the only run in this project to have posted an ROC-AUC meaningfully above 0.5, and on a single 4-hour chunk that result is well within the range of sampling noise.
 
@@ -167,8 +339,9 @@ Plausible explanations, roughly in order of how much they are worth chasing:
 
 1.  **Training volume.** 22,866 windows drawn from a single 8-hour block is a thin sample for a rare-event problem, and overlapping 1-second-stride windows are heavily autocorrelated, so the *effective* sample size is far smaller than the row count suggests. The `xgb.train` incremental loop across the full month is the obvious next step.
 2.  **Regime specificity.** All results come from one contiguous block of May 2026. Walk-forward validation across multiple days would separate a genuinely absent signal from one that exists only in certain regimes.
-3.  **Bar construction.** `group_by_dynamic` emits bars only for seconds that contain trades, so a quiet stretch silently compresses the timeline and the "60-bar" horizon is not always a literal 60 seconds. Reindexing onto a complete 1-second grid with forward-filled prices would make the horizon exact.
+3.  **Bar construction.** `group_by_dynamic` emits bars only for seconds that contain trades, so a quiet stretch silently compresses the timeline and the "60-bar" horizon is not always a literal 60 seconds. Reindexing onto a complete 1-second grid with forward-filled prices would make the horizon exact. *(Done for the PatchTST path in `sequence_matrix.py`, which measured the damage: about one second in five carries no trade. Still outstanding for `ml_matrix.py`, so the tabular runs above remain affected.)*
 4.  **Horizon and threshold.** A 5-basis-point move within 60 seconds is a demanding bar to clear. Sweeping the horizon and threshold jointly would show whether any tradeable combination carries signal at all.
+5.  **Aggregation.** $RV$, $BPV$ and $OFI$ are sums, and a sum cannot distinguish a shock at the start of the window from one at the end. If the signal lives in the *shape* of the five minutes rather than its totals, no amount of tuning the trees will find it. This is the hypothesis PatchTST exists to test — and, being a genuinely different hypothesis rather than a bigger model on the same features, it is the one worth testing next.
 
 ---
 

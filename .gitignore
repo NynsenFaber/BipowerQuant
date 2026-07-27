@@ -16,6 +16,13 @@ __pycache__/
 training_logs.txt
 *.csv
 *.parquet
+*.npz
+
+# Trained model checkpoints (git add -f the ones worth keeping)
+weights/*.pt
+
+# Jupyter
+.ipynb_checkpoints/
 
 .DS_Store
 
