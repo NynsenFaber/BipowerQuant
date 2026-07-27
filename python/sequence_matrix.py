@@ -44,6 +44,20 @@ HORIZON = 60
 # pi / 2, the Bipower Variation scale factor (mirrors PI_FACTOR in math_engine.hpp).
 PI_FACTOR = 1.5707963267948966
 
+# Guards the volatility normalisation against flat windows (mirrors ml_matrix.py).
+EPSILON = 1e-8
+
+# The tabular feature set, in the order ml_matrix.py stacks it.
+TABULAR_FEATURE_NAMES = [
+    "Realized Variance",
+    "Bipower Variation",
+    "Jumps",
+    "Order Flow Imbalance",
+    "5m Return",
+    "Vol-Adjusted OFI",
+    "Signed Jumps",
+]
+
 # --- Channel layout ----------------------------------------------------------
 
 # Per-bar quantities fed to the model as independent channels. Channels 1-3 are
@@ -281,6 +295,53 @@ def build_channels(bars: dict) -> np.ndarray:
     return np.ascontiguousarray(channels, dtype=np.float32)
 
 
+def build_tabular_features(
+    channels: np.ndarray,
+    price: np.ndarray,
+    starts: np.ndarray,
+    window: int = WINDOW_SIZE,
+) -> np.ndarray:
+    """The 7 features `ml_matrix.py` builds, derived from the same channel matrix.
+
+    This exists so the tabular baselines can be scored and timed on *exactly* the
+    windows PatchTST sees — same bars, same grid, same splits — instead of the
+    near-but-not-identical population `group_by_dynamic` produces.
+
+    The window offsets reproduce the C++ loop precisely: `math_engine.hpp` starts
+    its returns at i > 0 and its bipower pairs at i > 1, while OFI covers all bars.
+    """
+    cumulative = {
+        col: np.concatenate(([0.0], np.cumsum(channels[:, col], dtype=np.float64)))
+        for col in (1, 2, 3)
+    }
+
+    def window_sum(col: int, first_offset: int) -> np.ndarray:
+        c = cumulative[col]
+        return c[starts + window] - c[starts + first_offset]
+
+    realized_variance = window_sum(1, 1)
+    bipower = window_sum(2, 2)
+    order_flow = window_sum(3, 0)
+    jumps = np.maximum(realized_variance - bipower, 0.0)
+
+    log_price = np.log(price)
+    return_5m = log_price[starts + window - 1] - log_price[starts]
+    vol_adjusted_ofi = order_flow / (np.sqrt(bipower) + EPSILON)
+    signed_jumps = jumps * np.sign(return_5m)
+
+    return np.column_stack(
+        (
+            realized_variance,
+            bipower,
+            jumps,
+            order_flow,
+            return_5m,
+            vol_adjusted_ofi,
+            signed_jumps,
+        )
+    ).astype(np.float32)
+
+
 def build_targets(
     bars: dict, horizon: int = HORIZON, fee_threshold: float = FEE_THRESHOLD
 ) -> np.ndarray:
@@ -324,6 +385,7 @@ def chronological_split(
     val_frac: float = 0.1,
     purge: int = WINDOW_SIZE + HORIZON - 1,
     train_stride: int = 1,
+    val_stride: int = 1,
 ) -> dict[str, np.ndarray]:
     """Split windows in time order, purging the overlap at each boundary.
 
@@ -333,8 +395,12 @@ def chronological_split(
     windows before each boundary removes that overlap entirely.
 
     `train_stride > 1` thins the training windows (they are ~99.7% autocorrelated
-    at stride 1); validation and test always keep every window so the reported
-    metrics cover the full period.
+    at stride 1). `val_stride` does the same for validation, which is only used
+    for early stopping — on a full month, scoring every one of ~270k validation
+    windows every epoch costs more than the epoch does.
+
+    **Test is always kept at stride 1**, so the reported metric covers every
+    window in the held-out period.
     """
     n = starts.size
     train_end = int(n * train_frac)
@@ -346,7 +412,7 @@ def chronological_split(
         )
     return {
         "train": starts[: train_end - purge][::train_stride],
-        "val": starts[train_end : val_end - purge],
+        "val": starts[train_end : val_end - purge][::val_stride],
         "test": starts[val_end:],
     }
 
@@ -391,6 +457,7 @@ def build_sequence_dataset(
     train_frac: float = 0.7,
     val_frac: float = 0.1,
     train_stride: int = 1,
+    val_stride: int = 1,
 ) -> SequenceDataset:
     """Assemble channels, labels and purged chronological splits from bar data."""
     channels = build_channels(bars)
@@ -403,6 +470,7 @@ def build_sequence_dataset(
         val_frac=val_frac,
         purge=purge,
         train_stride=train_stride,
+        val_stride=val_stride,
     )
 
     meta = dict(bars.get("meta", {}))
@@ -415,6 +483,7 @@ def build_sequence_dataset(
             "train_frac": train_frac,
             "val_frac": val_frac,
             "train_stride": train_stride,
+            "val_stride": val_stride,
             "purge": purge,
             "n_windows": int(starts.size),
             "split_sizes": {k: int(v.size) for k, v in splits.items()},

@@ -140,6 +140,7 @@ def main() -> None:
         train_frac=data_meta.get("train_frac", 0.7),
         val_frac=data_meta.get("val_frac", 0.1),
         train_stride=data_meta.get("train_stride", 1),
+        val_stride=data_meta.get("val_stride", 1),
     )
     print(dataset.summary())
     _check_consistency(data_meta, dataset, strict=not args.allow_mismatch)

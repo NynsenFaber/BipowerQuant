@@ -200,6 +200,7 @@ The codebase is strictly divided between low-level performance execution and hig
 *   **`patchtst_model.py`**: The network (patching, channel-independent encoder, instance normalisation, classification head), the `WindowBatcher` that cuts overlapping windows out of a device-resident channel matrix, checkpoint I/O, and the shared metric helpers.
 *   **`patchtst_train.py`**: The training loop — AdamW with cosine schedule and warmup, mixed precision, gradient clipping, ROC-AUC early stopping with best-weight restore. Deliberately kept out of the notebook so the code that produced a checkpoint is version controlled beside the model.
 *   **`eval_patchtst.py`**: Loads an exported checkpoint, rebuilds the identical window population from the local CSV, scores the held-out split, and appends to `training_logs.txt`.
+*   **`benchmark_inference.py`**: Fits the Logistic Regression and XGBoost baselines on *exactly* the windows PatchTST is scored on, then times all three at inference — single-window latency and batched throughput — with every CPU model pinned to one thread. Also reports each model's ROC-AUC on those identical windows, which is the only strictly apples-to-apples accuracy comparison in this repository.
 
 ### `notebooks/` & `weights/`
 *   **`notebooks/train_patchtst_colab.ipynb`**: The GPU training driver — see §8.
@@ -223,23 +224,26 @@ git push -u origin add-patchTST
 
 ### Step 2 — Train in Colab
 
-Open [`notebooks/train_patchtst_colab.ipynb`](notebooks/train_patchtst_colab.ipynb) in Google Colab and set **Runtime → Change runtime type → T4 GPU**. Then run the cells in order:
+Open [`notebooks/train_patchtst_colab.ipynb`](notebooks/train_patchtst_colab.ipynb) in Google Colab, set **Runtime → Change runtime type → T4 GPU**, then **Runtime → Run all**. It is configured for the full month out of the box and pauses exactly once — at the start, for Google Drive authorisation. (Set `USE_DRIVE = False` to remove even that, at the cost of losing the cache and weights on a disconnect.)
 
-| Cell | What it does |
+| Section | What it does |
 | :--- | :--- |
 | **0** | Confirms a GPU is attached and enables TF32 |
 | **1** | Clones this repository, sets `BRANCH`, installs Polars |
-| **2** | Downloads `BTCUSDT-trades-2026-05.zip` straight from the Binance archive (~1.5 GB) and optionally mounts Drive |
+| **2** | Downloads `BTCUSDT-trades-2026-05.zip` straight from the Binance archive (~1.5 GB) and mounts Drive |
 | **3** | **The configuration cell** — every knob in one place |
-| **4** | Streams the CSV into 1-second bars, caching them to `.npz` |
+| **4** | Streams the CSV into 1-second bars (~28 s, ~5 GB peak), caching them to a ~28 MB `.npz` |
 | **5** | Builds batchers and the model; prints parameter count and resident memory |
-| **5b** | **Throughput probe** — times real training steps and estimates the epoch cost *before* you commit a session to it |
-| **6** | Trains, with early stopping on validation ROC-AUC |
-| **7** | Plots training loss and validation ROC-AUC |
-| **8** | Scores the held-out test split, with a threshold sweep |
-| **9** | Saves the checkpoint and triggers a browser download |
+| **6** | **Throughput probe** — times real training steps and estimates the epoch cost *before* you commit a session to it |
+| **7** | Trains, with early stopping on validation ROC-AUC |
+| **8** | Plots training loss and validation ROC-AUC |
+| **9** | Scores the held-out test split, with a threshold sweep |
+| **10** | **Inference benchmark** — latency and accuracy for all three models on identical windows |
+| **11** | Saves the checkpoint and triggers a browser download |
 
-Start with `HOURS = 8.0` — that reproduces the exact window population the July 26 XGBoost run used, which makes the first comparison apples-to-apples and finishes in minutes. Then set `HOURS = None` for the full month, raising `TRAIN_STRIDE` to 4–8 so an epoch stays affordable.
+**On sample size.** `HOURS = 8.0` leaves a test split of 95 minutes — about **16 independent observations** once you account for each window spanning 360 s. That is far too few to separate an edge from noise, which the block bootstrap below makes concrete. `HOURS = None` gives a 6.2-day test split, roughly **1,488 independent episodes**. Use the 8-hour setting to check the pipeline; use the month to draw conclusions.
+
+**On strides.** At stride 1 the month yields ~1.87M training windows that share 299 of every 300 bars. `TRAIN_STRIDE = 6` keeps essentially the same information at a sixth of the epoch cost, and `VAL_STRIDE = 6` does the same for early stopping. Test is always evaluated at stride 1.
 
 ### Step 3 — Bring the weights home
 
@@ -269,6 +273,27 @@ The script prints the metrics table plus a threshold sweep, and appends a row to
 | `--allow-mismatch` | score anyway when the local data does not match the checkpoint |
 
 **On the mismatch guard.** `eval_patchtst.py` compares the locally rebuilt bar count, first timestamp and split sizes against what the checkpoint recorded. If they differ — a different month, a truncated CSV, an edited `sequence_matrix.py` — it stops rather than reporting a number against a different window population. That is the failure mode most likely to produce a fake result, so it is an error by default rather than a warning.
+
+### Step 5 — Inference cost
+
+The notebook runs this as its second-to-last section; the same benchmark runs locally:
+
+```bash
+cd python
+python benchmark_inference.py --weights ../weights/<the-file>.pt \
+                              --bars-cache ../data/bars_full.npz
+```
+
+It reports two numbers per model, because they rank the models differently:
+
+*   **Single-window latency** — the trading number. What a signal costs when a window closes and you must decide before the next tick.
+*   **Batched throughput** — the research number. What a sweep or a backtest over a month of windows costs.
+
+Every CPU model is pinned to **one thread**, so the comparison measures models rather than core counts. The tabular models additionally pay a feature-preparation step (300 bars → 7 scalars) that PatchTST does not — it reads the raw window and normalises inside the forward pass — so that cost is reported separately and must be added to their latencies.
+
+Because the baselines have to be fitted in order to be timed, their test ROC-AUC comes out of the same run — measured on windows *identical* to PatchTST's, which the historical table further down is not.
+
+> **macOS note.** torch and xgboost ship separate OpenMP runtimes, and mixing them in one process either segfaults or deadlocks. `benchmark_inference.py` imports xgboost before torch and pins torch to one thread, which is the combination measured to work. If you import torch first (a notebook, a REPL), it raises with instructions instead of dying mid-run. Linux, including Colab, is unaffected.
 
 ## Current Training Results
 
@@ -300,25 +325,29 @@ The contextual features did not rescue the signal. Compared to the July 2 run, f
 *   **5m Return:** 0.1274
 *   **Realized Variance:** 0.0725
 
-### Phase 5: PatchTST — implemented, not yet trained
+### Phase 5: PatchTST — 8-hour pilot run, July 27, 2026
 
-The sequence pipeline described in §4 is complete and verified end to end (channels reconstruct the C++ aggregates to $10^{-15}$; checkpoints round-trip; CPU, MPS and CUDA agree), but **no training run has been scored yet.** This table is a placeholder to be filled from `python/training_logs.txt` after the first Colab run:
+A pilot run on the same 8 hours the Phase 4 XGBoost run used (T4 GPU, 19,550 training windows, early-stopped at epoch 4 of 30).
 
 | Metric | PatchTST | Reference |
 | :--- | :--- | :--- |
-| **Accuracy** | — | compare against the always-`0` accuracy the script prints |
-| **Precision** | — | compare against the test-set base rate, not against 0.5 |
-| **Recall** | — | — |
-| **F1-Score** | — | — |
-| **ROC-AUC** | — | 0.5000 is a coin flip |
+| **Accuracy** | 0.6999 | 0.9230 by always predicting `0` |
+| **Precision** | 0.0801 | 0.0770 test-set base rate |
+| **Recall** | 0.2763 | — |
+| **F1-Score** | 0.1242 | — |
+| **ROC-AUC** | 0.5459 | 0.5000 is a coin flip |
 
-**Read the eventual result the same way the Phase 4 result was read.** PatchTST has ~118k parameters against XGBoost's few hundred tree splits, so it has considerably more room to fit noise. Three things separate a finding from an artefact here:
+Nominally the best ROC-AUC the project has produced, and inside the 0.52–0.54 band normally called an edge. **It is not one**, for three reasons that a single headline number hides:
 
-*   **Precision above the base rate**, which the evaluation script prints side by side for exactly this reason.
-*   **ROC-AUC meaningfully above 0.52** — and on a single 8-hour block, even that is within sampling noise given ~1,700 effectively-independent windows.
-*   **Consistency across folds.** One good chronological split is not evidence. The walk-forward validation in Phase 5 of the roadmap applies to this model at least as much as to the trees.
+1.  **The sample cannot support the claim.** The test split is 1.58 hours; each observation spans 360 s, so there are ~16 independent episodes in it. A moving-block bootstrap over that split gives a 95% CI of **[0.4495, 0.6522]**, with a **23.4%** probability the true value is at or below 0.5.
+2.  **A one-line feature beats it.** On the identical windows, a plain rolling sum of $r_t^2$ scores **0.5876** and $\lvert r_{5m}\rvert$ scores 0.5848 — both above PatchTST's 0.5459. The model's probabilities are essentially uncorrelated with realized variance ($+0.018$), so it did not find a subtler version of that signal; it found a weaker, different one.
+3.  **The ranking is inverted where it matters.** Precision in the top 1% of predictions is 0.0000, top 5% is 0.0246, top 10% is 0.0511 — all far *below* the 0.0770 base rate, only reaching it around the top quartile. The model's most confident calls are its worst, which makes the ranking unusable for trading even if the AUC were real.
 
-The validation curve plotted by the notebook is the first diagnostic to look at: if validation ROC-AUC peaks in the first few epochs and decays while training loss keeps falling, the model is memorising overlapping windows, and the answer is a larger `TRAIN_STRIDE` or more tape — not a bigger network.
+The validation curve shows the expected shape: training loss falling monotonically (1.39 → 0.67) while validation ROC-AUC peaks at epoch 4 (0.6645) and decays. With 118k parameters against 19,550 windows that share 299 of every 300 bars, it starts memorising almost immediately. The 0.12 gap between validation (0.6645) and test (0.5459) is regime drift: positive rates across the three splits are 5.14% / 3.14% / 7.70%.
+
+**The full-month run is the one that can actually answer the question** — a 6.2-day test split holds ~1,488 independent episodes rather than 16. The notebook is configured for it; this section should be replaced with those numbers.
+
+**When reading them, the benchmark to beat is not 0.5 — it is realized variance.** If PatchTST cannot out-rank a single rolling sum out of sample, the sequence is buying nothing, whatever the AUC says.
 
 ### History
 
@@ -327,13 +356,14 @@ The validation curve plotted by the notebook is the first diagnostic to look at:
 | Jul 2 | Logistic Regression (OFI only, directional target) | 0.5335 | 0.5562 | 0.5343 |
 | Jul 2 | XGBoost (4-feature matrix, directional target) | 0.4921 | 0.3432 | 0.4872 |
 | Jul 26 | XGBoost (7-feature matrix, fee threshold) | 0.7711 | 0.1194 | 0.4980 |
-| — | PatchTST (6-channel sequence, fee threshold) | *pending* | *pending* | *pending* |
+| Jul 27 | PatchTST (6-channel sequence, 8h pilot) | 0.6999 | 0.1242 | 0.5459 |
+| — | PatchTST (6-channel sequence, full month) | *pending* | *pending* | *pending* |
 
 Note that the July 2 and July 26 rows are **not directly comparable** — they are scored against different target definitions on different class balances. The July 2 logistic baseline remains the only run in this project to have posted an ROC-AUC meaningfully above 0.5, and on a single 4-hour chunk that result is well within the range of sampling noise.
 
 ### Honest Assessment
 
-Across three runs, no configuration has produced a defensible statistical edge. The jump-diffusion features have not yet demonstrated alpha over the OFI baseline, and the fee-threshold target — while methodologically correct, since it stops rewarding untradeable moves — has so far only made the absence of signal easier to see.
+Across four runs, no configuration has produced a defensible statistical edge. The jump-diffusion features have not yet demonstrated alpha over the OFI baseline, and the fee-threshold target — while methodologically correct, since it stops rewarding untradeable moves — has so far only made the absence of signal easier to see.
 
 Plausible explanations, roughly in order of how much they are worth chasing:
 

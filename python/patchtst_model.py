@@ -119,7 +119,14 @@ def _make_norm(kind: str, d_model: int) -> nn.Module:
 
 
 class _MultiHeadAttention(nn.Module):
-    """Vanilla MHA routed through PyTorch's fused attention kernels."""
+    """Vanilla MHA routed through PyTorch's fused attention kernels.
+
+    No `dropout_p` is passed to `scaled_dot_product_attention`: the MPS backend
+    raises `NotImplementedError` for it, which would make the model trainable on
+    CUDA and CPU but not on Apple Silicon. Regularisation of the attention path is
+    handled by the residual dropout in `_EncoderLayer`, so behaviour is identical
+    on every device rather than silently differing by backend.
+    """
 
     def __init__(self, d_model: int, n_heads: int, dropout: float):
         super().__init__()
@@ -127,16 +134,13 @@ class _MultiHeadAttention(nn.Module):
             raise ValueError(f"d_model {d_model} must be divisible by n_heads {n_heads}")
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
-        self.dropout = dropout
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.proj = nn.Linear(d_model, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, n, d = x.shape
         qkv = self.qkv(x).view(b, n, 3, self.n_heads, self.d_head).permute(2, 0, 3, 1, 4)
-        out = F.scaled_dot_product_attention(
-            qkv[0], qkv[1], qkv[2], dropout_p=self.dropout if self.training else 0.0
-        )
+        out = F.scaled_dot_product_attention(qkv[0], qkv[1], qkv[2])
         return self.proj(out.transpose(1, 2).reshape(b, n, d))
 
 
@@ -246,12 +250,18 @@ class PatchTSTClassifier(nn.Module):
         if not self.cfg.use_scale_features:
             self.aux_fitted.fill_(1.0)
             return
-        total = torch.zeros(self.cfg.n_aux, dtype=torch.float64, device=batcher.device)
+        # Accumulated on the CPU in float64: these are sums of squares of values
+        # spanning ~20 orders of magnitude, so float32 would lose the variance —
+        # and MPS refuses float64 outright. The transfer is (batch, 2M) floats.
+        total = torch.zeros(self.cfg.n_aux, dtype=torch.float64)
         total_sq = torch.zeros_like(total)
         count = 0
         for x, _ in batcher.iter_batches(batch_size):
             _, aux = self.instance_norm(x)
-            aux = aux.double()
+            # .cpu() first, *then* .double(): a combined .to(cpu, float64) asks the
+            # source device for the cast, and MPS has no float64 at all — it
+            # silently returns inf rather than raising.
+            aux = aux.detach().cpu().double()
             total += aux.sum(0)
             total_sq += (aux * aux).sum(0)
             count += aux.shape[0]

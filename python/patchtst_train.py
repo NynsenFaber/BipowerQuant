@@ -60,16 +60,123 @@ def pick_device(prefer: str | None = None) -> torch.device:
 
 
 def _amp_setup(device: torch.device, enabled: bool):
-    """bf16 where the GPU supports it, fp16 + loss scaling otherwise."""
+    """bf16 only where the hardware runs it natively, fp16 + loss scaling otherwise.
+
+    `torch.cuda.is_bf16_supported()` is not the right test on its own: recent
+    PyTorch counts *emulated* bf16, so it returns True on a Turing T4 (sm_75) where
+    bf16 is slower than fp16. Native bf16 starts at Ampere (sm_80).
+    """
     if not enabled or device.type != "cuda":
         return None, None
-    if torch.cuda.is_bf16_supported():
+    major, _ = torch.cuda.get_device_capability(device)
+    if major >= 8 and torch.cuda.is_bf16_supported():
         return torch.bfloat16, None
     try:
         scaler = torch.amp.GradScaler("cuda")
     except (AttributeError, TypeError):  # older torch
         scaler = torch.cuda.amp.GradScaler()
     return torch.float16, scaler
+
+
+def _sync(device: torch.device) -> None:
+    """Block until queued device work is done, so timings mean something."""
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
+def _training_step(
+    model: PatchTSTClassifier,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    amp_dtype: torch.dtype | None,
+    scaler,
+    grad_clip: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """One optimiser step. Shared by `fit` and `estimate_throughput`.
+
+    Both call this so a throughput estimate cannot drift from what training
+    actually costs — the first version of the probe left out gradient clipping
+    and autocast and was optimistic by roughly 2x.
+    """
+    optimizer.zero_grad(set_to_none=True)
+    if amp_dtype is not None:
+        with torch.autocast(device_type=device.type, dtype=amp_dtype):
+            loss = criterion(model(x), y)
+    else:
+        loss = criterion(model(x), y)
+
+    if scaler is not None:
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
+    return loss
+
+
+def estimate_throughput(
+    model: PatchTSTClassifier,
+    batcher: WindowBatcher,
+    cfg: TrainConfig | None = None,
+    device: torch.device | None = None,
+    warmup: int = 5,
+    measured: int = 20,
+) -> float:
+    """Windows/s of the *real* training step, measured on a copy of the model.
+
+    The caller's weights and optimiser state are untouched — this runs against a
+    deep copy — so it is safe to call immediately before `fit`.
+    """
+    cfg = cfg or TrainConfig()
+    device = device or batcher.device
+    probe = copy.deepcopy(model).to(device)
+    probe.train()
+
+    optimizer = torch.optim.AdamW(probe.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    scheduler = _cosine_schedule(optimizer, max(warmup + measured, 1), cfg.warmup_frac)
+    try:
+        pos_weight = torch.tensor(batcher.pos_weight(), dtype=torch.float32, device=device)
+    except ValueError:  # no positives in this split; irrelevant to timing
+        pos_weight = None
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    amp_dtype, scaler = _amp_setup(device, cfg.amp)
+
+    started, seen = None, 0
+    for step, (x, y) in enumerate(batcher.iter_batches(cfg.batch_size, shuffle=True)):
+        if step == warmup:
+            _sync(device)
+            started, seen = time.perf_counter(), 0
+        loss = _training_step(
+            probe, x, y, criterion, optimizer, scheduler, amp_dtype, scaler, cfg.grad_clip, device
+        )
+        # fit() pays this host sync on every step; the probe must pay it too.
+        float(loss.item())
+        if started is not None:
+            seen += y.numel()
+            if step >= warmup + measured - 1:
+                break
+    _sync(device)
+
+    if started is None or seen == 0:
+        raise ValueError(
+            f"Split has too few batches to probe ({batcher.n_batches(cfg.batch_size)}); "
+            "lower `warmup`/`measured` or the batch size."
+        )
+    elapsed = time.perf_counter() - started
+    del probe, optimizer
+    return seen / elapsed
 
 
 def _cosine_schedule(optimizer, total_steps: int, warmup_frac: float):
