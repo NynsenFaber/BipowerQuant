@@ -12,12 +12,14 @@ compile_commands.json
 __pycache__/
 *.pyc
 
-# Local data, caches and logs
+# Local data, caches and generated results
 training_logs.txt
 *.csv
 *.parquet
 *.npz
-data/scores.json
+# Scored metrics and walk-forward results: regenerable, and the figures that read
+# them are committed. `git add -f` one if you want a specific run to stay pinned.
+data/*.json
 
 # Trained model checkpoints (git add -f the ones worth keeping)
 weights/*.pt

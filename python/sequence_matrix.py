@@ -393,12 +393,12 @@ def build_tabular_features(
     )
 
 
-LABEL_MODES = ("triple_barrier", "fee_threshold")
+LABEL_MODES = ("triple_barrier", "barrier_touched", "fee_threshold")
 
 
-def triple_barrier_labels(
+def triple_barrier(
     price: np.ndarray, horizon: int = HORIZON, barrier: float = BARRIER
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Lopez de Prado's triple barrier, vectorised over every bar at once.
 
     From each bar `i`, walk the next `horizon` bars and record which of three
@@ -408,12 +408,19 @@ def triple_barrier_labels(
         lower  (loss)   : log p_{i+k} - log p_i < -log(1 + barrier)
         vertical (time) : neither, within k <= horizon
 
-    Returns an int8 array: `+1` upper first, `-1` lower first, `0` vertical.
-    Bars closer than `horizon` to the end of the series have a truncated path and
-    are returned as `0` rather than labelled from partial information.
+    Returns `(side, exit_offset, defined)`:
+
+    * `side` — int8, `+1` upper first, `-1` lower first, `0` vertical barrier.
+    * `exit_offset` — int32, bars from `i` until the position closes: the first
+      touch, or `horizon` when the vertical barrier ends it. This is what a
+      backtest needs and what a plain label cannot supply, since holding period
+      is what turns a hit rate into a Sharpe.
+    * `defined` — bool, False for the last `horizon` bars, whose forward path is
+      truncated by the end of the series and whose label would be drawn from
+      partial information.
 
     Cost is `horizon` vectorised passes over the series rather than a per-bar
-    loop — ~4 s for a month of 1-second bars, against hours for the naive form.
+    loop — ~0.3 s for a month of 1-second bars, against hours for the naive form.
     """
     log_p = np.log(np.asarray(price, dtype=np.float64))
     n = log_p.size
@@ -429,11 +436,23 @@ def triple_barrier_labels(
         first_up[: n - k][forward > theta] = k
         first_down[: n - k][forward < -theta] = k
 
-    label = np.zeros(n, dtype=np.int8)
-    label[first_up < first_down] = 1
-    label[first_down < first_up] = -1
-    label[max(n - horizon, 0) :] = 0  # truncated paths are not labels
-    return label
+    side = np.zeros(n, dtype=np.int8)
+    side[first_up < first_down] = 1
+    side[first_down < first_up] = -1
+
+    exit_offset = np.minimum(np.minimum(first_up, first_down), horizon).astype(np.int32)
+
+    defined = np.ones(n, dtype=bool)
+    defined[max(n - horizon, 0) :] = False
+    side[~defined] = 0
+    return side, exit_offset, defined
+
+
+def triple_barrier_labels(
+    price: np.ndarray, horizon: int = HORIZON, barrier: float = BARRIER
+) -> np.ndarray:
+    """Just the side, for callers that do not need exit timing."""
+    return triple_barrier(price, horizon=horizon, barrier=barrier)[0]
 
 
 def build_targets(
@@ -453,6 +472,13 @@ def build_targets(
     predict. The price is that ~79% of windows resolve on the vertical barrier
     and drop out of the population.
 
+    `label_mode="barrier_touched"` is the **gate**: `y = 1` if *either* horizontal
+    barrier is reached inside the horizon, defined on every window rather than a
+    subset. This is the volatility question, and it is deliberately the easy one —
+    pairing a gate that predicts *whether* a window is tradeable with a side model
+    that predicts *which way* is what lets the pair be evaluated on the whole
+    population instead of on a subset chosen with hindsight. See `metalabel.py`.
+
     `label_mode="fee_threshold"` is the original target, `forward_return > 5bp`.
     It is a **compound event** — a large move happened *and* it went up — and the
     first conjunct is far easier to forecast than the second, so a model
@@ -466,8 +492,12 @@ def build_targets(
     n = price.size
 
     if label_mode == "triple_barrier":
-        side = triple_barrier_labels(price, horizon=horizon, barrier=barrier)
-        return (side > 0).astype(np.int8), side != 0
+        side, _, defined = triple_barrier(price, horizon=horizon, barrier=barrier)
+        return (side > 0).astype(np.int8), (side != 0) & defined
+
+    if label_mode == "barrier_touched":
+        side, _, defined = triple_barrier(price, horizon=horizon, barrier=barrier)
+        return (side != 0).astype(np.int8), defined
 
     if label_mode == "fee_threshold":
         y = np.zeros(n, dtype=np.int8)
@@ -736,6 +766,77 @@ def dataset_kwargs_from(data_meta: dict) -> dict:
         "train_stride": data_meta.get("train_stride", 1),
         "val_stride": data_meta.get("val_stride", 1),
     }
+
+
+def concat_bars(parts: list[dict]) -> dict:
+    """Splice consecutive bar series into one continuous 1-second grid.
+
+    Months arrive as separate archives but the market does not restart between
+    them, so a walk-forward run over six months wants one series, not six. Parts
+    are sorted by their first timestamp and any gap between them is filled the
+    same way a trade-less second inside a month is: forward-filled price, zero
+    volume, zero flow. Overlaps are an error rather than something to silently
+    de-duplicate — they mean the same tape was passed twice.
+    """
+    if not parts:
+        raise ValueError("concat_bars needs at least one bar series")
+    if len(parts) == 1:
+        return parts[0]
+
+    parts = sorted(parts, key=lambda b: int(b["ts"][0]))
+    for earlier, later in zip(parts, parts[1:]):
+        if int(later["ts"][0]) <= int(earlier["ts"][-1]):
+            raise ValueError(
+                f"Bar series overlap: one ends at {earlier['ts'][-1]}, the next starts "
+                f"at {later['ts'][0]}. Passing the same month twice would double-count it."
+            )
+
+    first, last = int(parts[0]["ts"][0]), int(parts[-1]["ts"][-1])
+    grid = np.arange(first, last + 1, dtype=np.int64)
+    out = {
+        "ts": grid,
+        "price": np.full(grid.size, np.nan, dtype=np.float64),
+        "qty": np.zeros(grid.size, dtype=np.float64),
+        "n_trades": np.zeros(grid.size, dtype=np.float64),
+        "ofi": np.zeros(grid.size, dtype=np.float64),
+    }
+    for part in parts:
+        lo = int(part["ts"][0]) - first
+        hi = lo + part["ts"].size
+        for key in ("price", "qty", "n_trades", "ofi"):
+            out[key][lo:hi] = part[key]
+
+    # Carry the last observed price across any inter-part gap.
+    missing = np.isnan(out["price"])
+    if missing.any():
+        observed = np.where(~missing, np.arange(out["price"].size), 0)
+        np.maximum.accumulate(observed, out=observed)
+        out["price"] = out["price"][observed]
+        if np.isnan(out["price"][0]):
+            raise ValueError("The earliest bar series starts with no price")
+
+    sources = [p.get("meta", {}).get("source", "?") for p in parts]
+    out["meta"] = {
+        "source": " + ".join(sources),
+        "sources": sources,
+        "n_bars": int(grid.size),
+        "first_ts": first,
+        "last_ts": last,
+        "traded_seconds": int(sum(p.get("meta", {}).get("traded_seconds", 0) for p in parts)),
+        "empty_seconds": int(
+            grid.size - sum(p.get("meta", {}).get("traded_seconds", 0) for p in parts)
+        ),
+        "gap_seconds": int(missing.sum()),
+        "hours": None,
+        "skip_hours": 0.0,
+        "part_bounds": [[int(p["ts"][0]), int(p["ts"][-1])] for p in parts],
+    }
+    return out
+
+
+def load_bar_caches(paths: list[str | Path]) -> dict:
+    """Load several `save_bars` caches and splice them into one series."""
+    return concat_bars([load_bars(p) for p in paths])
 
 
 def load_or_build_bars(

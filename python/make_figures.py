@@ -392,29 +392,40 @@ def figure_dataset(bars: dict, path: Path) -> dict:
     side = seq.triple_barrier_labels(price, seq.HORIZON, seq.BARRIER)
     starts = seq.valid_window_starts(n)
     side_w = side[starts + seq.WINDOW_SIZE - 1]
-    train_end, val_end = int(starts.size * 0.7), int(starts.size * 0.8)
+
+    # Calendar months, and which of them a walk-forward run holds out. Shading a
+    # 70/10/20 split here would contradict how the models are actually validated.
+    import walkforward as wf
+
+    months = wf.month_blocks(ts)
+    try:
+        folds = wf.build_folds(ts, "anchored", 3)
+        test_months = {f.name.split("-> ")[-1] for f in folds}
+    except SystemExit:  # too few months to form a fold; just show the calendar
+        test_months = set()
 
     fig, (ax1, ax2, ax3) = plt.subplots(
         3, 1, figsize=(9.4, 6.6), gridspec_kw={"height_ratios": [2.1, 1.25, 1.0]}
     )
 
-    # -- price, with the split regions marked --
+    # -- price, with each month marked and the held-out ones highlighted --
     day = (ts - ts[0]) / 86400.0
     step = max(n // 12000, 1)  # ~12k points is past the resolution of the figure
     ax1.plot(day[::step], price[::step], color=INK, linewidth=0.9)
-    for lo, hi, color, name in (
-        (0, train_end, BLUE, "train 70%"),
-        (train_end, val_end, AQUA, "val 10%"),
-        (val_end, n, ORANGE, "test 20%"),
-    ):
-        ax1.axvspan(day[lo], day[min(hi, n - 1)], color=color, alpha=0.10)
-        ax1.text((day[lo] + day[min(hi, n - 1)]) / 2, price.max(), name,
-                 ha="center", va="bottom", fontsize=8.5, color=color)
+    for label, lo, hi in months:
+        held_out = label in test_months
+        color = ORANGE if held_out else BLUE
+        ax1.axvspan(day[lo], day[min(hi, n - 1)], color=color, alpha=0.12 if held_out else 0.05)
+        ax1.text((day[lo] + day[min(hi, n - 1)]) / 2, price.max() * 1.005,
+                 label[-2:] + ("  (test)" if held_out else ""),
+                 ha="center", va="bottom", fontsize=8, color=color if held_out else MUTED)
     ax1.set_ylabel("BTC/USDT", fontsize=9)
-    ax1.set_ylim(price.min() * 0.995, price.max() * 1.02)
+    ax1.set_ylim(price.min() * 0.99, price.max() * 1.05)
     _clean(ax1, x_grid=False)
     ax1.set_title(
-        f"{meta['source']} — {n:,} one-second bars over {days:.0f} days",
+        f"{len(months)} month{'s' if len(months) != 1 else ''} — {n:,} one-second bars "
+        f"over {days:.0f} days"
+        + (f"; {len(test_months)} held out by walk-forward" if test_months else ""),
         fontsize=11.5, color=INK, pad=10, loc="left", fontweight="bold",
     )
 

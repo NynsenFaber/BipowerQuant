@@ -2,14 +2,23 @@
 
 **Can you predict which way Bitcoin moves in the next minute?**
 
-This repository is an honest attempt at that question on a full month of tick-level
-BTC/USDT data. It combines a C++20 jump-diffusion math engine, an out-of-core Polars
-ingestion pipeline, and three models — Logistic Regression, XGBoost, and a PatchTST
-Transformer — all solving the identical classification problem on the identical windows.
+This repository is an honest attempt at that question on **six months of tick-level BTC/USDT
+data** — 742 million trades. It combines a C++20 jump-diffusion math engine, an out-of-core
+Polars ingestion pipeline, three models (Logistic Regression, XGBoost, PatchTST), walk-forward
+validation across months, and a backtest with fees, slippage and FIFO queue position.
 
-The short answer is: **a little, and not enough to trade yet.** The long answer — including
-the labelling mistake that turned a 0.046 edge into an apparent 0.247 one, and how it was
-caught — is below.
+**The answer is no**, and the interesting part is how thoroughly no:
+
+* Out of sample the directional model scores **0.51 ROC-AUC**, and its gross P&L before any
+  cost is **0.000 bp per trade**. An earlier version of this project measured 0.546 inside a
+  single month; two-thirds of that was the month, not the market.
+* The 5 bp profit target was set to one taker round trip, which is **6 bp**. A predictor told
+  the correct answer in advance still loses money. The target was defined below its own cost.
+* What *does* work, robustly and across every month tested, is the thing the project treated
+  as a nuisance: forecasting **whether** a move happens at all, at **0.78 ROC-AUC** — matched
+  to within 0.005 by a single rolling sum with no parameters.
+
+Everything below is the evidence for those three claims, and the machinery that produced it.
 
 ---
 
@@ -17,7 +26,7 @@ caught — is below.
 
 ### An example
 
-It is 14:32:00 on a Tuesday. Over the last five minutes BTC/USDT has traded about 8,000
+It is 14:32:00 on a Tuesday. Over the last five minutes BTC/USDT has traded about 14,000
 times; the price drifted up 12 bp, there was one 30-BTC sell wall forty seconds ago, and the
 tape has been quiet since. You have to decide, right now, whether to buy.
 
@@ -60,14 +69,14 @@ The pipeline consumes raw Binance public trade data — one row per executed tra
 | | |
 | :--- | ---: |
 | Source | [Binance Vision: BTC/USDT spot trades](https://data.binance.vision/?prefix=data/spot/monthly/trades/BTCUSDT/) |
-| File | `BTCUSDT-trades-2026-05.csv` (~1.5 GB zipped, **5.1 GB** raw) |
-| Individual trades | **72,566,188** |
-| Period | 31 days (May 2026) |
-| Volume | 425,331 BTC |
-| Price range | \$72,520.93 – \$82,840.42 |
+| Files | `BTCUSDT-trades-2026-01` … `2026-06` (~15 GB zipped, **52 GB** raw) |
+| Period | **181 days**, January–June 2026 |
+| Individual trades | **742,244,193** |
+| Volume | 3,566,529 BTC |
+| Price range | \$58,130 – \$97,924 |
 
-**On the time scale.** The *input* is genuinely tick-level: 72.5 M individual trades, an
-average of **28 trades per second**, with bursts past 400,000 trades an hour. The pipeline's
+**On the time scale.** The *input* is genuinely tick-level: 742 M individual trades, an
+average of **47 trades per second**, with bursts past 400,000 trades an hour. The pipeline's
 first step folds those ticks into **1-second bars** — the finest uniform grid on which a
 5-minute lookback and a 60-second deadline are both well defined. So a "tick" in the raw
 file is one trade; a "bar" in the model is one second, and the 300-step lookback is 5
@@ -75,138 +84,227 @@ minutes of wall clock, not 300 trades.
 
 | | |
 | :--- | ---: |
-| 1-second bars | **2,678,400** |
-| …carrying at least one trade | 2,284,821 |
-| …carrying **none** | 393,579 (**14.7%**) |
+| 1-second bars | **15,638,400** |
+| …carrying at least one trade | 13,923,707 |
+| …carrying **none** | 1,714,693 (**11.0%**) |
 
-That last row is why the bar grid is built the way it is. Roughly one second in seven has no
-trade at all. A naive `group_by` emits no bar for those seconds, which silently makes a
+That last row is why the bar grid is built the way it is. Roughly one second in nine has no
+trade at all — and in the quietest month it is one in seven. A naive `group_by` emits no bar for those seconds, which silently makes a
 "60-bar horizon" span an arbitrary 60–80 seconds of wall clock that varies with how busy the
 market is — and under a triple barrier, where the deadline *is* the horizon, that would make
 the label itself depend on activity. Every second in the period therefore gets a bar;
 trade-less ones carry a forward-filled price, zero volume, and zero order flow.
 
-### Windows and splits
+### Windows, labels and splits
 
 Windows advance one second at a time, so consecutive windows share 299 of their 300 bars.
-Of the 2,678,041 windows in the month:
+Across the 15,638,041 windows in the six months:
 
 | Outcome within 60 s | Windows | Share |
 | :--- | ---: | ---: |
-| Upper barrier first (`y = 1`) | 281,581 | 10.5% |
-| Lower barrier first (`y = 0`) | 292,086 | 10.9% |
-| **Neither — vertical barrier** | **2,104,374** | **78.6%** |
+| Upper barrier first (`y = 1`) | 3,078,499 | 19.7% |
+| Lower barrier first (`y = 0`) | 3,129,242 | 20.0% |
+| **Neither — vertical barrier** | **9,430,300** | **60.3%** |
 
-Most minutes go nowhere, so most windows carry no side and are dropped. What remains is
-**573,667 labelled windows, near-perfectly balanced** — which is the trade the triple
-barrier makes: a fifth of the data, in exchange for a label that volatility cannot fake.
+Most minutes go nowhere, so most windows carry no side and are dropped from the side model's
+training set. What remains is 6.2 M labelled windows, near-perfectly balanced — the trade the
+triple barrier makes: two-fifths of the data, for a label volatility cannot fake.
 
-Splits are chronological — 70% train / 10% validation / 20% test — with a **purge** of
-$L + H - 1 = 359$ windows before each boundary. Without it the last training windows are
-labelled by price moves that fall inside the next split's lookback. With it, the
-information footprints of the two sides are disjoint by exactly one bar. The held-out test
-block is **113,319 labelled windows** spanning the final 6.2 days.
+That headline hides the thing six months of data is for: the rate is not stable.
+
+| Test month | Barrier touched within 60 s |
+| :--- | ---: |
+| April | 32.8% |
+| May | 21.4% |
+| June | 46.4% |
+
+June is more than twice as tradeable as May. Any statistic estimated on one month —
+including every number in this project's earlier single-month study — is an estimate of that
+month's regime, not of the market.
+
+**Splits are walk-forward, by calendar month.** Each fold trains only on months strictly
+before its test month and is scored on that month alone, so every reported number is a
+genuine forecast:
+
+| Fold | Trains on | Tests on |
+| :--- | :--- | :--- |
+| 1 | Jan–Mar | April |
+| 2 | Jan–Apr | May |
+| 3 | Jan–May | June |
+
+Within each fold a **purge** of $L + H - 1 = 359$ windows sits before the boundary. Without
+it the last training windows are labelled by price moves that fall inside the test month's
+first lookback; with it the information footprints of the two sides are disjoint by exactly
+one bar.
 
 ---
 
 ## 3. Results
 
-*BTC/USDT, May 2026. All models trained on the same 413,312 windows and scored on the same
-113,319 held-out windows. Target: which ±5 bp barrier is touched first within 60 s. Base
-rate 47.1%. Intervals are moving-block bootstrap, blocked at 360 windows so overlapping
-windows are not counted as independent.*
+Two questions, in the order that matters. Does the model work on a month it has never
+seen? And does what it finds survive contact with trading costs?
 
-| | Logistic Regression | XGBoost |
+The answers are **partly** and **no**.
+
+### 3.1 What transfers across months
+
+![Gate and side AUC, fold by fold](assets/walkforward_auc.png)
+
+The problem splits into two predictions, and they behave completely differently
+out of sample.
+
+**The gate — "will *any* barrier be touched in the next 60 seconds?"** This is the
+volatility question. It transfers cleanly:
+
+| Test month | XGBoost, 7 features | Realized variance, untrained |
 | :--- | ---: | ---: |
-| Input | OFI only (1 scalar) | 7 stochastic features |
-| Parameters | 2 | 100 trees, depth 4 |
-| **ROC-AUC** | 0.4691 | **0.5462** |
-| 95% CI | [0.4460, 0.4893] | [0.5262, 0.5652] |
-| P(AUC ≤ 0.5) | 1.000 | 0.000 |
-| Precision | 0.4370 | 0.5024 |
-| Recall | 0.4201 | 0.4857 |
-| F1 | 0.4284 | 0.4939 |
-| Median latency | 0.002 ms | 0.045 ms |
+| April | 0.7801 | 0.7748 |
+| May | 0.7777 | 0.7728 |
+| June | 0.8023 | 0.7977 |
 
-> **PatchTST is not in this table yet.** It scored 0.7407 on the *old* target and its
-> architecture has since changed (§5.3). Retraining it against the triple barrier needs a
-> GPU session; §6 has the instructions, and the row is deliberately left empty rather than
-> filled with a number measured against a different label.
+Stable at ~0.78–0.80 across three months of very different character. Note the second
+column: a plain rolling sum of $r_t^2$, with no training and no parameters, is within
+**0.005** of the gradient-boosted trees every single time. The jump-diffusion feature set
+is a good volatility estimator, and that is all it is — which is what $RV$ and $BPV$ were
+designed to be.
 
-**Accuracy is not reported.** With a 47% base rate it happens to be readable here, but it
-was actively misleading under the old 7%-positive target — a model that never fires scored
-0.93 — and leaving the column out is the safer habit. Read ROC-AUC and precision.
+**The side — "which barrier first?"** This is the directional question, and it does not
+transfer:
 
-**What the number means.** XGBoost separates up-first from down-first windows at
-**0.5462 ROC-AUC**, with the bootstrap excluding 0.5 in every one of 400 resamples. In
-high-frequency finance 0.52–0.54 is the band usually called an edge, so this is real but
-small. Its most confident calls do carry lift — the top 1% of predictions are 63.6% correct
-against a 47.1% base rate, a **1.35×** lift — but no backtest with slippage and queue
-position has been run, and 0.55 against a 5 bp cost bar is a long way from a strategy.
+| Test month | Logistic (OFI) | Logistic (7 features) | XGBoost |
+| :--- | ---: | ---: | ---: |
+| April | 0.5035 | 0.5053 | 0.5104 |
+| May | 0.4957 | 0.4865 | **0.5332** |
+| June | 0.5087 | 0.5090 | 0.5107 |
 
-![Every model against untrained single features](assets/auc_comparison.png)
+Between 0.49 and 0.53, with the linear model dipping below a coin flip in May. For
+comparison, the earlier single-month study — training on May's first 70% and testing on
+May's last 20% — reported **0.5462** for the same XGBoost. Train on Jan–April instead and
+test on all of May and it gives 0.5332; on April and June it gives 0.510.
 
-*(The figure reads XGBoost at 0.5481, the table at 0.5462. `make_figures.py` rebuilds the
-seven features in NumPy so it can run without the compiled C++ engine, and differencing a
-2.7-million-term cumulative sum to recover a 300-term window sum loses enough precision —
-about 5e-8 relative — for XGBoost's split decisions to shift the third decimal. Both are deep
-inside the ±0.02 interval. It is a fair calibration on how small this signal is that a
-perturbation that size is visible in the result at all.)*
+**That gap is the entire value of adding five months.** A 0.55 measured inside one month was
+not a lie, but it was mostly that month, and the honest out-of-sample figure is 0.51.
 
-Order Flow Imbalance alone is *worse* than a coin flip (0.4691, and the bootstrap puts
-P(AUC ≤ 0.5) at 1.000). That is not a broken model — it is a real and consistent effect:
-over a 1-minute horizon, aggressive buying is followed by the *lower* barrier more often
-than the upper one. Order flow at this horizon mean-reverts. Inverting the sign would give
-0.53; it is left as-is because the point of the baseline is to report what raw OFI does, not
-to fit a sign to the test set.
+### 3.2 Trading a population you can actually select
 
-The trained models now edge past the best untrained single feature — the 5-minute return, at
-0.5435 — instead of trailing it. That is a change of *sign* from every earlier version of
-this project, but be careful how much weight it takes: the margin is **+0.003** for XGBoost
-and +0.008 for a linear model on the same seven features, both comfortably inside the
-bootstrap interval. The right reading is "training is no longer actively worse than a rolling
-sum", not "training has been shown to help".
+The side model is trained only on windows where a barrier is touched — but *whether* a
+barrier will be touched is not knowable when the decision is made. Reporting its accuracy on
+that subset silently conditions on the outcome, and no amount of walk-forward fixes it: the
+population itself is chosen with hindsight.
 
-### Why the target was changed
+The fix is **meta-labelling**, with the two predictions given different jobs:
+
+| | Question | Target | Trained on |
+| :--- | :--- | :--- | :--- |
+| **Gate** | is this window worth trading at all? | was *either* barrier touched? | every window |
+| **Side** | which way? | which barrier came first? | windows where one did |
+
+At decision time both produce a number from past data alone. A trade is taken when the gate
+clears its threshold, in the direction the side model gives. The traded population is
+therefore selected by a *prediction* rather than by an *outcome* — and the backtest scores
+every window that selection admits, including the ones where the gate turns out to be wrong
+and the position is closed by the clock at whatever price is available.
+
+The threshold itself is a quantile of the **training** months' gate scores, not the test
+month's. Taking "the top 10% of this month" would require that month's score distribution in
+advance; the difference is small, because those distributions are stable, but a study whose
+entire subject is selecting a population honestly should not import the answer through the
+threshold.
+
+This is López de Prado's construction with the roles assigned to fit the problem: his
+primary model gives the side and a secondary model sizes the bet; here the volatility
+forecast, which is the part that actually works, decides *whether*, and the weak directional
+model only decides *which way*.
+
+Two gates are compared throughout, and the comparison is the point: the trained XGBoost gate,
+and realized variance thresholded at a percentile. As the table above shows, the second is
+within 0.005 of the first — so the honest architecture is the rolling sum.
+
+### 3.3 The backtest
+
+![Break-even barrier against hit rate](assets/economics.png)
+
+Before any model: a position that wins captures the barrier $B$ and one that loses gives
+back $B$, so with hit rate $h$ and round-trip cost $c$ the expectation per trade is
+
+$$\mathbb{E}[\text{P\&L}] = B\,(2h - 1) - c$$
+
+which is positive only when $B > c / (2h-1)$. On this instrument $c$ is **6.0 bp**: 2.5 bp
+taker fee each side, 0.5 bp slippage each side, and a spread that rounds to nothing (BTC/USDT
+quotes one tick, \$0.01, which across this sample's \$58k–\$98k range is **0.001–0.002 bp** —
+three orders of magnitude below the fee, and too small for the Roll estimator to resolve
+against 1-second return noise at all).
+
+**The barrier this project has been using is 5 bp, against a 6 bp round trip.** A perfect
+predictor loses money. That is not a modelling failure, it is arithmetic — and simulating an
+oracle that is told the true side confirms it exactly:
+
+| | Gross per trade | Cost | Net |
+| :--- | ---: | ---: | ---: |
+| **Oracle** (100% hit rate) | +5.943 bp | 6.001 bp | **−0.058 bp** |
+| Coin flip | −0.030 bp | 6.001 bp | −6.031 bp |
+
+At the measured out-of-sample hit rate the requirement is far out of reach: 0.51 needs a
+**300 bp** barrier, 0.55 needs 60 bp, and even 0.65 needs 20 bp.
+
+![Net basis points per trade, by model and gate](assets/backtest.png)
+
+The full walk-forward backtest, pooled across the three out-of-sample months, with one
+position at a time:
+
+| Model | Gate | Trades | Gross/trade | Net/trade | Sharpe | 95% CI |
+| :--- | :--- | ---: | ---: | ---: | ---: | :--- |
+| XGBoost | RV, top 10% | 35,341 | −0.001 bp | −6.002 bp | −15.19 | [−26.07, −12.12] |
+| Logistic (7f) | RV, top 10% | 35,341 | +0.012 bp | −5.990 bp | −15.31 | [−26.12, −12.22] |
+| XGBoost | XGBoost, top 20% | 58,177 | −0.007 bp | −6.008 bp | −18.60 | [−29.76, −14.79] |
+| XGBoost | RV, top 50% | 107,913 | +0.006 bp | −5.996 bp | −28.44 | [−37.28, −23.57] |
+| XGBoost | none | 173,445 | +0.003 bp | −5.999 bp | −61.63 | [−96.70, −47.84] |
+
+Read the **gross** column, because it is the one that does not depend on the cost
+assumptions. It is zero. Not small — zero, to three decimal places, for every model and
+every gate. The strategies do not lose to fees; they capture nothing to pay fees with.
+
+Gating helps only in the sense that trading less loses less. The Sharpe improves from −62 to
+−15 purely because a tenth as many round trips are paid for.
+
+**Positions never overlap.** Windows advance every second, so a backtest that opens a
+position on every flagged window would count the same price move hundreds of times and
+report a Sharpe inflated by roughly the square root of that overlap. Signals arriving while
+a position is already open are dropped, and in the ungated run the overwhelming majority
+are: millions of flagged windows collapse to 173,445 actual trades. Any backtest of this
+strategy that skips that step is wrong by a large factor, in the flattering direction.
+
+### 3.4 Why the target was defined this way
 
 ![The same features under both target definitions](assets/volatility_vs_direction.png)
 
+*(This figure is the historical record of the target change: May 2026 only, chronological
+70/10/20 split, which is the study it was drawn from. The point it makes is definitional
+rather than a claim about generalisation — regenerate it on any period with
+`make_figures.py` and the shape is the same.)*
+
 An earlier version of this project reported **0.7469 ROC-AUC** and read it as a directional
-result. It was not one, and this figure is why.
+result. It was not one, and this figure is why the target was rewritten.
 
 The old target was $y_t = 1$ if the forward 60-second return exceeded +5 bp. That is a
-**compound event**: *a large move happened* **and** *it went up*. The first conjunct is much
+**compound event**: *a large move happened* **and** *it went up*. The first conjunct is far
 easier to predict than the second, because volatility is strongly autocorrelated — so a
-model optimising the compound drifts into forecasting magnitude and is scored as though it
-had forecast direction.
+model optimising the compound drifts into forecasting magnitude while being scored as though
+it had forecast direction.
 
-The evidence is that a plain rolling sum of $r_t^2$ over the lookback — one line of NumPy,
-no training, no parameters — scored **0.7464** on that target, statistically level with the
-full 7-feature XGBoost (0.7469) and above the 118k-parameter Transformer (0.7407). The
-reason is visible in the label rates: across realized-variance deciles on the old target,
-the positive rate runs from **1.3%** in the quietest decile to **23.2%** in the most
-violent. Ranking windows by volatility therefore ranks the label, with no directional skill
-whatsoever.
+The evidence is that a plain rolling sum of $r_t^2$ over the lookback — one line of NumPy, no
+training, no parameters — scores **0.7464** on that target, statistically level with the full
+7-feature XGBoost and above a 118k-parameter Transformer. Under the triple barrier the same
+rolling sum collapses to **0.5316**, because both of its classes require the same 5 bp move.
+The 0.75 was never wrong as a number; it was a well-measured volatility forecast wearing a
+direction forecast's label.
 
-Under the triple barrier the same rolling sum collapses to **0.5316**, because both of its
-classes require the same 5 bp move. The 0.75 was never wrong as a number; it was a
-well-measured volatility forecast wearing a direction forecast's label.
+Everything in §3.1 is a direct consequence: that volatility forecast is the *gate*, it is
+worth 0.78 out of sample, and it is the only part of this project that works.
 
-*(This was not data leakage. The splits were and are purged correctly — the information
-footprints of adjacent splits are disjoint by construction, verified bar by bar on the full
-month.)*
+*(None of this was data leakage. Splits were and are purged correctly — the information
+footprints of adjacent splits are disjoint by construction, verified bar by bar.)*
 
-### Where the edge lives
-
-![Confidence in the tail, and AUC within volatility deciles](assets/residual_signal.png)
-
-Two checks that a single headline AUC hides. **Left:** precision rises monotonically with
-confidence — the model's most certain calls really are its best ones, which is what makes a
-ranking usable at all. (In an earlier 8-hour run this was *inverted*, the top 1% being the
-worst predictions, so it is a genuine change and not just a larger sample.) **Right:** AUC
-computed *within* each realized-variance decile, which asks whether the edge is an artefact
-of one volatility regime. It is not — XGBoost stays above 0.5 in 9 of 10 deciles and averages
-0.541 — though it is visibly stronger in quiet markets than violent ones.
 
 ---
 
@@ -266,23 +364,34 @@ $OFI$, and the three above — are the full input to the Logistic Regression and
 
 ## 5. The models
 
-All three solve the identical problem: same bars, same windows, same purged splits, same
-triple-barrier labels. They differ only in what they read.
+All of them solve the identical problem: same bars, same windows, same walk-forward folds,
+same triple-barrier labels, same execution model in the backtest. They differ only in what
+they read. Any of them can play either role in §3.2 — gate or side — and the two roles are
+fitted separately, on different populations, in every fold.
 
 ### 5.1 Logistic Regression — the control
 
 One feature, OFI, two parameters. Not a contender; it exists so the gap between it and
 XGBoost measures what the jump-diffusion features actually bought. Pass `--all-features` to
 give it all seven, which separates "the extra inputs helped" from "the non-linearity
-helped": on this data it reaches 0.5512, statistically indistinguishable from XGBoost's
-0.5462, meaning almost all of the tree model's edge is in the *features*, not the trees.
+helped". Out of sample it lands at 0.487–0.509 as a side model — indistinguishable from
+XGBoost's 0.510–0.533, and from a coin flip.
+
+Its OFI-only form is *below* 0.5 on two of three months. That is not a broken model but a
+real effect: over a 60-second horizon, aggressive buying is followed by the *lower* barrier
+slightly more often than the upper one, so raw order flow mean-reverts at this scale.
+Inverting the sign is left undone on purpose — fitting a sign to the test set is how a fake
+edge gets born.
 
 ### 5.2 XGBoost — the workhorse
 
-100 trees, depth 4, learning rate 0.05, on the seven-feature matrix. `scale_pos_weight` is
-recomputed from the training split at every run rather than assumed — it lands at 1.02
-under the triple barrier, but was 12.19 under the old target, and the code should not care
-which.
+200 trees, depth 5, learning rate 0.05, subsample 0.8, on the seven-feature matrix.
+`scale_pos_weight` is recomputed from each fold's training rows rather than assumed — it
+lands near 1.0 for the side model, since the triple barrier is balanced by construction, and
+well away from it for the gate.
+
+This is the model that carries the gate, where it reaches **0.78–0.80** out of sample. It is
+also, by a margin of 0.005, no better at that job than thresholding realized variance.
 
 ### 5.3 PatchTST — the sequence model
 
@@ -312,6 +421,11 @@ normalisation is applied per window and channel, which is what lets the model su
 regime shifts — but it also deletes *how* volatile the window was, so the discarded
 per-channel mean and log-std are standardised and concatenated back into the head.
 
+One model is trained per fold, on that fold's training months only, and every fold scores
+**all** of its test windows — including the ones where no barrier is touched, which the gate
+may still let through. Its predictions go through the same backtest as everything else; it is
+not evaluated on its own terms anywhere.
+
 ---
 
 ## 6. Getting started
@@ -331,108 +445,116 @@ runs without it, which is what lets the same code run in a Colab runtime.
 
 ### Get the data
 
-Download `BTCUSDT-trades-2026-05.zip` from the
-[Binance archive](https://data.binance.vision/?prefix=data/spot/monthly/trades/BTCUSDT/),
-unzip it into `data/`, and point `FILE_PATH` in [python/data_feeder.py](python/data_feeder.py)
-at it if you use a different name or month.
+Download the six monthly archives `BTCUSDT-trades-2026-01.zip` … `-06.zip` from the
+[Binance archive](https://data.binance.vision/?prefix=data/spot/monthly/trades/BTCUSDT/) and
+unzip them into `data/`. That is ~15 GB compressed and **~52 GB unpacked**, so check your
+disk first — or skip it entirely and let the Colab notebook do the download, since it folds
+each month to bars and deletes the CSV before fetching the next.
 
-### Run the baselines
+Any contiguous set of months works; `--train-months` and the fold construction adapt.
 
-The first run streams 72 M ticks into 1-second bars (~35 s) and caches them, so every later
-run starts instantly:
+### Build the bar caches
+
+The first run streams each month's ticks into 1-second bars and caches them, so every later
+run starts instantly. Six months is ~52 GB of CSV in and 165 MB of `.npz` out, about four
+minutes:
 
 ```bash
 cd python
-python train_baseline.py --bars-cache ../data/bars_full.npz                  # OFI only
-python train_baseline.py --bars-cache ../data/bars_full.npz --all-features   # all seven
-python train_xgboost.py  --bars-cache ../data/bars_full.npz
+for m in 01 02 03 04 05 06; do
+  python -c "import sequence_matrix as s; s.save_bars(
+      s.load_second_bars(f'../data/BTCUSDT-trades-2026-$m.csv'), f'../data/bars_2026-$m.npz')"
+done
+python -c "import sequence_matrix as s; s.save_bars(
+    s.load_bar_caches([f'../data/bars_2026-{m:02d}.npz' for m in range(1,7)]),
+    '../data/bars_6m.npz')"
 ```
 
-Each prints ROC-AUC with a bootstrap interval, precision against the base rate, and appends
-a timestamped row to `python/training_logs.txt`. Useful flags:
+The months are spliced into one continuous grid — the market does not restart between
+archives — with any gap between them forward-filled the same way a trade-less second is.
+
+### The walk-forward study and the backtest
+
+This is the main experiment: fit a gate and a side model per fold, score the held-out month,
+then run every (model, gate, threshold) combination through the execution model.
+
+```bash
+cd python
+python walkforward.py --bars ../data/bars_6m.npz --out ../data/wf_5bp.json
+```
 
 | Flag | Purpose |
 | :--- | :--- |
-| `--hours 8` | use the first 8 hours only — a fast pipeline check |
-| `--label-mode fee_threshold` | restore the old `return > +5bp` target |
-| `--no-log` | do not append to `training_logs.txt` |
+| `--scheme rolling` | fixed-width training window instead of expanding |
+| `--scheme holdout` | one split: first half trains, second half tests |
+| `--train-months 3` | how many months a fold trains on before its first test month |
+| `--train-stride 5` | thin training windows (they are ~99.7% autocorrelated); test is always dense |
+| `--entry maker --exit taker` | post passively into the queue instead of crossing |
+| `--taker-fee-bps 2.5` | per side; `--maker-fee-bps`, `--slippage-bps` likewise |
+| `--patchtst-probs …npz` | fold PatchTST's per-fold predictions into the same backtest |
 
-A cache is only reused when it holds *exactly* the slice you asked for, so combining
-`--hours 8` with a full-month `--bars-cache` is an error rather than a silent full-month run
-reported under an 8-hour label. Use `--hours 8` on its own, or give it its own cache file.
+It prints per-fold gate and side AUCs, then the pooled out-of-sample table. At stride 5 on
+six months it takes roughly 25 minutes.
 
-Use 8 hours to check the pipeline, never to draw a conclusion: its test block holds about 16
-independent episodes, and the bootstrap interval comes out at roughly [0.34, 0.79] against
-the month's [0.53, 0.57].
+To ask whether *any* barrier and horizon could clear costs:
+
+```bash
+python sweep_barriers.py --bars ../data/bars_6m.npz \
+                         --barriers 5 10 20 40 --horizons 60 300 900
+```
 
 ### Train PatchTST
 
-Training happens on a free Colab GPU; scoring happens locally against the exported
-checkpoint.
+Training happens on a free Colab GPU; the backtest happens locally against the exported
+probabilities.
 
 1. **Push your branch.** The notebook clones this repository rather than carrying a copy of
    the model code, so whatever branch holds `python/patchtst_model.py` must exist on your
-   remote. (No remote? The notebook's markdown documents uploading the four Python files
-   through the Colab file browser instead.)
+   remote. (No remote? The notebook's markdown documents uploading the Python files through
+   the Colab file browser instead.)
 2. **Open [notebooks/train_patchtst_colab.ipynb](notebooks/train_patchtst_colab.ipynb) in
-   Colab.** Set *Runtime → Change runtime type → T4 GPU*, then *Runtime → Run all*. It is
-   configured for the full month and pauses once, at the start, for Drive authorisation —
-   set `USE_DRIVE = False` to remove even that, at the cost of losing the cache if the
-   runtime disconnects. The notebook downloads the Binance archive itself; nothing is
-   uploaded.
-3. **Bring the weights home.** The last cell triggers a browser download of a ~0.9 MB `.pt`.
-   Move it into `weights/`.
+   Colab.** Set *Runtime → Change runtime type → T4 GPU*, then *Runtime → Run all*. It
+   downloads all six archives itself, folding each into bars and deleting the CSV before
+   fetching the next — six months of raw CSV would not fit on a Colab disk. It pauses once,
+   near the start, for Drive authorisation.
+3. **Bring the probabilities home.** The last cell downloads `patchtst_probs.npz`, one array
+   per fold. Put it in `data/` and re-run `walkforward.py --patchtst-probs`.
 
-Cell 6 is a throughput probe that times real training steps and estimates the epoch cost
-*before* you commit a session to it. `HOURS = 8.0` gives a fast sanity run; `HOURS = None`
-gives the month, which is what any conclusion needs — an 8-hour test split holds only about
-16 independent episodes.
+**It will finish overnight.** `TIME_BUDGET_HOURS` is enforced, not advisory: the notebook
+measures real training throughput, projects the cost across every fold, and raises the
+training stride until the run fits. Windows overlap by 299 of 300 bars, so striding discards
+far less information than it discards rows, which is what makes that safe to decide
+automatically. The default budget is 6 hours.
 
-### Score it locally
+The same loop runs locally, which is how the numbers in §3 were produced:
 
 ```bash
-cd python
-python eval_patchtst.py --weights ../weights/<your-file>.pt \
-                        --bars-cache ../data/bars_full.npz
+python patchtst_folds.py --bars ../data/bars_6m.npz \
+                         --out ../data/patchtst_probs.npz \
+                         --epochs 10 --time-budget-hours 1.0
 ```
-
-The checkpoint carries its own data recipe — source file, bar count, window, horizon,
-barrier width, label mode, channel layout, split fractions and sizes. `eval_patchtst.py`
-rebuilds that exact window population from your local CSV and **refuses to score if it
-cannot reproduce it**, rather than quietly reporting a number against a different
-population. Pass `--allow-mismatch` if you know why they differ.
-
-| Flag | Purpose |
-| :--- | :--- |
-| `--device mps` | Apple Silicon GPU (verified identical to CPU) |
-| `--split val` | score the validation split instead |
-| `--threshold 0.6` | change the probability cut-off for the hard label |
-| `--save-predictions probs.npy` | dump per-window probabilities |
 
 ### Regenerate the figures
 
 ```bash
 cd python
-python make_figures.py --bars-cache ../data/bars_full.npz \
-                       --scores-cache ../data/scores.json
+python make_walkforward_figures.py --result ../data/wf_5bp.json
+python make_figures.py --bars-cache ../data/bars_6m.npz --scores-cache ../data/scores.json
 ```
 
-Every plotted number is recomputed from the held-out split at render time — including the
+Every plotted number is recomputed from the result file at render time — including the
 figure titles, which are chosen from the data — so a figure cannot drift out of sync with
-the result it illustrates. `--scores-cache` stores the scored metrics so restyling does not
-re-run inference over 113k windows; delete it to force a rescore. Add
-`--weights ../weights/<file>.pt` to include PatchTST; without it the tabular models are
-drawn alone.
+the result it illustrates.
 
 ### Benchmark inference cost
 
 ```bash
 cd python
 python benchmark_inference.py --weights ../weights/<your-file>.pt \
-                              --bars-cache ../data/bars_full.npz
+                              --bars-cache ../data/bars_2026-05.npz
 ```
 
-Measured on Apple Silicon, one thread per model, 113,319 windows:
+Measured on Apple Silicon, one thread per model:
 
 | Model | Single window (median) | p99 | Batched, per window | Windows/s |
 | :--- | ---: | ---: | ---: | ---: |
@@ -462,50 +584,82 @@ batch 1 and ~770× faster batched.
 
 | Component | Technology | Role |
 | :--- | :--- | :--- |
-| Data ingestion | Polars (lazy/streaming) | folds 72 M ticks into 2.7 M bars in one pass, flat memory |
+| Data ingestion | Polars (lazy/streaming) | folds 742 M ticks into 15.6 M bars, one pass per month, flat memory |
 | Math engine | C++20 + `pybind11` | rolling $RV$, $BPV$, jumps and OFI over raw NumPy buffers, no copies |
-| Tabular models | XGBoost, scikit-learn | the seven-feature classifier and the OFI control |
-| Sequence model | PyTorch | PatchTST, trained on a Colab GPU, scored locally from a checkpoint |
+| Tabular models | XGBoost, scikit-learn | the gate, the seven-feature side model, and the OFI control |
+| Sequence model | PyTorch | PatchTST, trained per fold on a Colab GPU |
+| Backtest | NumPy | fees, spread, slippage, FIFO queue position, non-overlapping positions |
 
-Two efficiency notes worth knowing before reading the code:
+Three efficiency notes worth knowing before reading the code:
 
 * **Windows are never materialised.** Consecutive windows share 299 of 300 bars, so a
-  materialised training tensor would cost `n_windows × M × 300` float32s. The `(M, n_bars)`
-  channel matrix instead lives on the device once — ~21 MB for a month at two channels — and
+  materialised training tensor would cost `n_windows × M × 300` float32s — about 37 GB for
+  six months. The `(M, n_bars)` channel matrix instead lives on the device once (~125 MB) and
   every batch is a single gather. No `DataLoader`, no per-batch host-to-device copies.
-* **The triple barrier is vectorised.** Labelling 2.7 M bars naively means 160 M
-  first-passage comparisons; here it is $H$ vectorised passes over the series, a few seconds
-  instead of hours.
+* **The triple barrier is vectorised.** Labelling 15.6 M bars naively means 938 M
+  first-passage comparisons; here it is $H$ vectorised passes over the series, a couple of
+  seconds instead of hours.
+* **The backtest is a loop only where it must be.** Deciding whether a position may be opened
+  depends on when the previous one closed, so that part is sequential; everything after it —
+  exit bars, gross returns, daily aggregation — is vectorised over the selected trades.
 
 ---
 
 ## 8. What is and is not established
 
-**Established.** On a full month of BTC/USDT, a 7-feature jump-diffusion matrix separates
-up-first from down-first 60-second outcomes at ~0.55 ROC-AUC, with a bootstrap interval that
-excludes 0.5 comfortably. Most of that comes from the features rather than the model class:
-a linear model on the same seven features matches the gradient-boosted trees.
+**Established: the volatility forecast is real and it generalises.** Predicting whether
+*either* barrier will be touched in the next 60 seconds scores **0.78–0.80 ROC-AUC** on every
+one of three months it was never trained on. That is a genuinely useful quantity — it is what
+a gate, a position sizer, or a risk limit needs. The jump-diffusion framework earns its keep
+here and nowhere else, which is fair: $RV$ and $BPV$ are volatility estimators, and that is
+what they were designed to be.
 
-**Not established.** That this is tradeable. A 0.55 AUC and a 1.35× lift in the confident
-tail are not a strategy — what is missing is a backtest with slippage and queue position
-reporting Sharpe on the flagged windows, not AUC over all of them. It is entirely possible
-that 0.55 does not clear 5 bp.
+**Established: the trained gate is not worth its complexity.** Realized variance alone —
+one rolling sum, no parameters — is within **0.005 AUC** of the 7-feature gradient-boosted
+gate in all three folds. If you want the gate, take the rolling sum.
 
-**Not yet measured.** Whether reading the *sequence* beats reading the aggregates. PatchTST
-has not been retrained against the triple-barrier target; that is the open question this
-repository was built to answer.
+**Established: there is no directional edge.** Out of sample the side model scores
+0.51–0.53, and a linear model on the same features drops below 0.5 on one month. The earlier
+single-month figure of 0.546 was measured by training and testing inside May, and roughly
+two-thirds of it was that month rather than the market. The backtest is blunter still: gross
+P&L before any cost is **0.000 bp per trade**, for every model and every gate.
 
-**A caveat on the population.** The model is trained and scored only on windows where a
-barrier is touched, which is not knowable in advance. In deployment that means either
-accepting positions that close at the vertical barrier, or gating with a separate volatility
-model to decide *whether* to trade while this one decides *which way* — the second is
-López de Prado's meta-labelling, and this project already has a volatility forecast that
-scores 0.75 for the gate.
+**Established: this target cannot pay for itself.** The round trip is 6.0 bp (2.5 bp taker
+each side, 0.5 bp slippage each side, spread negligible) against a 5 bp barrier. An oracle
+told the true side in advance nets **−0.058 bp per trade**. Before any question about model
+quality, the target was defined below its own transaction cost. At the measured hit rate the
+barrier would need to be ~300 bp, which no 60-second horizon supplies.
 
-**A caveat on the sample.** Everything here is one month of one instrument. Walk-forward
-validation across several months is the check that has not been run.
+**Not established: that a wider barrier fixes it.** `sweep_barriers.py` exists to ask
+whether some (barrier, horizon) pair clears costs. Widening the barrier raises the payoff per
+win but shrinks the number of resolving windows and lengthens the holding period, and whether
+the hit rate survives is an empirical question this repository can now answer but has not
+answered at every setting.
 
----
+**Not established: that the sequence adds anything.** PatchTST is trained and scored through
+the identical folds and backtest, but on a signal indistinguishable from noise there is
+nothing for an architecture comparison to resolve.
+
+**A caveat that remains.** Six months of one instrument in one year. The volatility result
+is robust enough that it will very likely hold elsewhere; nothing else here is strong enough
+to be worth generalising.
+
+### If you are picking this up
+
+The honest read is that the interesting object in this repository is the **gate**, not the
+predictor it was built to serve. A 0.78-AUC 60-second volatility forecast that costs one
+rolling sum to compute is worth more than a directional model that does not exist. Sensible
+next moves, in order:
+
+1. **Use the gate for something that pays for volatility rather than direction** — spread
+   capture, quoting width, inventory limits. All of them are long volatility-forecast and
+   short nothing.
+2. **If you want direction, change the horizon.** Sixty seconds at 5 bp is a regime where
+   the cost is the same size as the signal. Minutes-to-hours horizons have proportionally
+   smaller costs and are where directional edges are usually found.
+3. **Fix the cost side before the model side.** Passive entry (`--entry maker`) cuts the
+   round trip from 6.0 bp to 3.0 bp and is already implemented, queue model included. It does
+   not rescue a zero gross, but it changes what a future signal would have to clear.
 
 ## Appendix: metrics
 
@@ -530,8 +684,16 @@ $$\text{Recall} = \frac{TP}{TP+FN}$$
 
 $$F_1 = 2\cdot\frac{\text{Precision}\cdot\text{Recall}}{\text{Precision}+\text{Recall}}$$
 
-**Bootstrap intervals.** All confidence intervals here come from a *moving-block* bootstrap
-with a block length of $L + H = 360$ windows. An i.i.d. bootstrap would be wrong and
-flatteringly so: consecutive windows share 299 of 300 bars and their labels come from
-overlapping forward paths, so resampling single windows treats hundreds of correlated
-observations as independent and returns an interval several times too narrow.
+**Sharpe ratio** — mean daily P&L over its standard deviation, annualised by $\sqrt{365}$
+(crypto trades continuously, so the 252-day convention does not apply). Aggregating to
+*daily* P&L before computing it is deliberate: a per-trade Sharpe would depend on how often
+the strategy happens to fire, which is not a property of the edge.
+
+$$\text{Sharpe} = \frac{\overline{r_{\text{daily}}}}{\sigma(r_{\text{daily}})}\sqrt{365}$$
+
+**Bootstrap intervals.** AUC intervals come from a *moving-block* bootstrap with a block
+length of $L + H = 360$ windows. An i.i.d. bootstrap would be wrong and flatteringly so:
+consecutive windows share 299 of 300 bars and their labels come from overlapping forward
+paths, so resampling single windows treats hundreds of correlated observations as
+independent and returns an interval several times too narrow. Sharpe intervals resample
+whole days, for the same reason at a coarser scale.
