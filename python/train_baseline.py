@@ -1,62 +1,115 @@
-import numpy as np
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+"""
+Train the Logistic Regression baseline on Order Flow Imbalance alone.
 
-from data_feeder import get_lazy_feeder, stream_hourly_chunks, FILE_PATH
-from ml_matrix import build_training_matrix
+    cd python
+    python train_baseline.py --bars-cache ../data/bars_full.npz
 
+This is the control, not a contender. It sees **one** number per window — OFI —
+so whatever it scores is what pure order-flow momentum is worth on this target,
+and the gap between it and XGBoost is what the jump-diffusion features bought.
+Pass `--all-features` to give it the full 7-feature matrix instead, which is the
+right comparison if you want to know how much of XGBoost's score needs a
+non-linear model rather than just the extra inputs.
+"""
+
+from __future__ import annotations
+
+import argparse
 from datetime import datetime
+from pathlib import Path
 
-def log_results(model_name, acc, f1, roc_auc, extra=""):
-    with open("training_logs.txt", "a") as f:
-        f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {model_name}\n")
-        f.write(f"Accuracy: {acc:.4f} | F1: {f1:.4f} | ROC-AUC: {roc_auc:.4f}\n")
-        if extra:
-            f.write(f"{extra}\n")
-        f.write("-" * 50 + "\n")
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
 
-def train_and_evaluate():
-    print("1. Loading data and building feature matrix...")
-    lazy_pipeline = get_lazy_feeder(FILE_PATH)
-    # Stream a larger chunk (e.g., 4 hours) to get a solid training sample
-    feeder = stream_hourly_chunks(lazy_pipeline, chunk_hours=4) 
-    chunk = next(feeder)
-    
-    X_full, y_full = build_training_matrix(chunk)
-    
-    print("2. Isolating the OFI feature...")
-    # In ml_matrix.py, X is stacked as (RV, BPV, Jumps, OFI)
-    # OFI is at index 3
-    X_ofi = X_full[:, 3].reshape(-1, 1)
-    
-    # Split chronologically (80% train, 20% test) to prevent time-series leakage
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_ofi, y_full, test_size=0.2, shuffle=False
+import sequence_matrix as seq
+from data_feeder import FILE_PATH
+from ml_matrix import FEATURE_NAMES, build_from_csv
+from train_xgboost import log_results, purged_split
+
+# Column 3 of the 7-feature matrix; see sequence_matrix.TABULAR_FEATURE_NAMES.
+OFI_COLUMN = FEATURE_NAMES.index("Order Flow Imbalance")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--csv", default=FILE_PATH)
+    parser.add_argument("--bars-cache", default=None, help="reuse/write a .npz second-bar cache")
+    parser.add_argument("--hours", type=float, default=None, help="None = the whole file")
+    parser.add_argument("--label-mode", default="triple_barrier", choices=seq.LABEL_MODES)
+    parser.add_argument("--all-features", action="store_true", help="use all 7, not just OFI")
+    parser.add_argument("--no-log", action="store_true")
+    args = parser.parse_args()
+
+    print("1. Building the feature matrix ...")
+    X_full, y, starts, bars = build_from_csv(
+        args.csv, hours=args.hours, cache=args.bars_cache, label_mode=args.label_mode
     )
-    
-    print("3. Training Logistic Regression Baseline...")
-    # class_weight='balanced' handles any imbalance between up/down directional ticks
-    model = LogisticRegression(class_weight='balanced')
+    n_windows = seq.valid_window_starts(bars["price"].size).size
+
+    if args.all_features:
+        X, description = X_full, f"all {X_full.shape[1]} features"
+    else:
+        X, description = X_full[:, [OFI_COLUMN]], "Order Flow Imbalance only"
+    print(f"   {X.shape[0]:,} windows | {description} | positive rate {y.mean():.2%}")
+
+    print("2. Splitting chronologically, purging the boundaries ...")
+    masks = purged_split(starts, n_windows)
+    X_train, y_train = X[masks["train"]], y[masks["train"]]
+    X_test, y_test = X[masks["test"]], y[masks["test"]]
+    print(f"   train {len(y_train):,} | test {len(y_test):,}")
+
+    print("3. Training Logistic Regression ...")
+    # The features span ~20 orders of magnitude (RV is ~1e-7, OFI is ~1e2), so an
+    # unscaled solver either fails to converge or converges to the wrong place.
+    # Scaling is monotone per feature, so it cannot change a single-feature AUC.
+    model = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(class_weight="balanced", max_iter=1000),
+    )
     model.fit(X_train, y_train)
-    
-    print("4. Calculating Metrics...")
+
+    print("4. Scoring ...")
     y_pred = model.predict(X_test)
     y_prob = model.predict_proba(X_test)[:, 1]
-    
+
     acc = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+    precision = precision_score(y_test, y_pred, zero_division=0)
+    recall = recall_score(y_test, y_pred, zero_division=0)
     roc_auc = roc_auc_score(y_test, y_prob)
-    
-    print("\n✅ Baseline Model Evaluated Successfully")
+
+    ci = seq.block_bootstrap_auc(y_test, y_prob)
+
+    print("\n✅ Logistic Regression evaluated")
     print("=========================================")
-    print(f"Accuracy:  {acc:.4f}")
+    print(f"ROC-AUC:   {roc_auc:.4f}   95% CI [{ci['lo']:.4f}, {ci['hi']:.4f}], "
+          f"P(<=0.5) = {ci['p_le_half']:.3f}")
+    print(f"Precision: {precision:.4f}   (base rate: {y_test.mean():.4f})")
+    print(f"Recall:    {recall:.4f}")
     print(f"F1-Score:  {f1:.4f}")
-    print(f"ROC-AUC:   {roc_auc:.4f}")
+    print(f"Accuracy:  {acc:.4f}   (always-0 baseline: {1 - y_test.mean():.4f})")
     print("=========================================")
 
-    # store the logs
-    log_results("Logistic Regression (Baseline)", acc, f1, roc_auc)
+    if not args.no_log:
+        extra = (
+            f"Input: {description} | Label: {args.label_mode} at "
+            f"+/-{seq.BARRIER:.4%} over {seq.HORIZON}s\n"
+            f"ROC-AUC 95% CI: [{ci['lo']:.4f}, {ci['hi']:.4f}] | "
+            f"P(AUC <= 0.5) = {ci['p_le_half']:.3f}\n"
+            f"Precision: {precision:.4f} | Recall: {recall:.4f} | "
+            f"Test windows: {len(y_test):,}"
+        )
+        log_results(f"Logistic Regression ({description}, triple barrier)", acc, f1, roc_auc, extra)
+        print(f"\nAppended to {Path(__file__).with_name('training_logs.txt')}")
+
 
 if __name__ == "__main__":
-    train_and_evaluate()
+    main()

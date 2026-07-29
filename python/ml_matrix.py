@@ -1,115 +1,153 @@
-import polars as pl
+"""
+Tabular feature matrix for the Logistic Regression and XGBoost baselines.
+
+Each 5-minute lookback window is collapsed into 7 scalars by the C++ engine
+(`bipower_core`) and labelled by the triple-barrier method. `sequence_matrix.py`
+owns the two things both pipelines must agree on — the 1-second bar grid and the
+labels — so the tabular and sequence models are guaranteed to be solving the
+identical problem on the identical windows rather than approximately so.
+
+The bar grid is **complete**: every second in the period gets a bar, trade-less
+seconds carrying a forward-filled price and zero volume. That matters more than
+it sounds like it should. This module previously used Polars' `group_by_dynamic`,
+which emits a bar only for seconds that contain a trade — and on BTC/USDT ~15% of
+seconds contain none, so a "60-bar horizon" was really a horizon of an arbitrary
+70-odd seconds that varied with how busy the market was. Under a triple barrier,
+where the vertical barrier *is* the horizon, that would make the label itself
+depend on activity.
+"""
+
+from __future__ import annotations
+
 import numpy as np
-import bipower_core # type: ignore
-from data_feeder import get_lazy_feeder, stream_hourly_chunks, FILE_PATH
+import bipower_core  # type: ignore
 
-# Minimum forward return required to call a move "profitable".
-# 0.0005 == 5 basis points, roughly a taker round-trip on Binance spot.
-FEE_THRESHOLD = 0.0005
+import sequence_matrix as seq
+from sequence_matrix import (  # re-exported so callers have one place to import from
+    BARRIER,
+    EPSILON,
+    HORIZON,
+    WINDOW_SIZE,
+)
 
-# 5-minute lookback window (in 1-second bars) used by the C++ engine
-WINDOW_SIZE = 300
+FEATURE_NAMES = seq.TABULAR_FEATURE_NAMES
 
-# 1-minute forward prediction horizon (in 1-second bars)
-HORIZON = 60
 
-# Guards the volatility normalisation against completely flat windows
-EPSILON = 1e-8
+def rolling_metrics(bars: dict, window: int = WINDOW_SIZE) -> dict:
+    """Run the C++ sliding-window engine over a complete 1-second bar grid.
 
-FEATURE_NAMES = [
-    "Realized Variance",
-    "Bipower Variation",
-    "Jumps",
-    "Order Flow Imbalance",
-    "5m Return",
-    "Vol-Adjusted OFI",
-    "Signed Jumps",
-]
-
-def build_training_matrix(df_raw: pl.DataFrame):
-    # 1. Resample irregular ticks into uniform 1-second bars
-    # This automatically provides our 1-second stride engine
-    df_1s = (
-        df_raw.sort("time")
-        .group_by_dynamic("time", every="1s")
-        .agg([
-            pl.col("price").last().forward_fill(),
-            pl.col("qty").sum(),
-            # True if the majority of trades in this second were sell pressure
-            (pl.col("is_buyer_maker").cast(pl.Int32).sum() > (pl.len() / 2)).alias("is_buyer_maker")
-        ])
-        .drop_nulls()
+    The engine signs order flow with a per-bar `is_buyer_maker` boolean and adds
+    the whole bar quantity, so it is fed `|ofi|` with the sign carried in the
+    flag. Its `order_flow_imbalance` output is then exactly the tick-level netted
+    signed volume `sequence_matrix` computes, instead of a per-second majority
+    vote that discards offsetting trades inside the same second.
+    """
+    signed_volume = bars["ofi"]
+    return bipower_core.calculate_rolling_metrics(
+        np.ascontiguousarray(bars["price"], dtype=np.float64),
+        np.ascontiguousarray(np.abs(signed_volume), dtype=np.float64),
+        np.ascontiguousarray(signed_volume < 0, dtype=bool),
+        window,
     )
 
-    # 2. Create the 1-minute forward target y
-    # 1 only if the forward move clears the fee threshold; every down move,
-    # flat move, or unprofitable up move collapses into 0
-    df_1s = df_1s.with_columns(
-        ((pl.col("price").shift(-HORIZON) / pl.col("price")) - 1.0).alias("forward_return")
-    ).with_columns(
-        (pl.col("forward_return") > FEE_THRESHOLD).cast(pl.Int8).alias("target_y")
+
+def build_training_matrix(
+    bars: dict,
+    window: int = WINDOW_SIZE,
+    horizon: int = HORIZON,
+    barrier: float = BARRIER,
+    label_mode: str = "triple_barrier",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`(X, y, starts)` for every window the labelling scheme actually resolves.
+
+    `starts` is the bar index each retained window begins at, which is what lets
+    a caller split chronologically and purge the boundaries the same way the
+    sequence pipeline does.
+    """
+    price = bars["price"]
+    metrics = rolling_metrics(bars, window)
+
+    starts = seq.valid_window_starts(price.size, window=window, horizon=horizon)
+    y_all, usable = seq.build_targets(
+        bars, horizon=horizon, barrier=barrier, label_mode=label_mode
     )
 
-    # 3. Extract flat arrays for the C++ engine
-    prices = df_1s["price"].to_numpy().astype(np.float64)
-    qtys = df_1s["qty"].to_numpy().astype(np.float64)
-    maker = df_1s["is_buyer_maker"].to_numpy().astype(bool)
-    targets = df_1s["target_y"].to_numpy()
+    # The engine emits one row per window start, so its output aligns 1:1 with
+    # `starts` once the trailing windows without a defined label are dropped.
+    realized_variance = np.asarray(metrics["realized_variance"])[starts]
+    bipower = np.asarray(metrics["bipower_variation"])[starts]
+    jumps = np.asarray(metrics["jump_component"])[starts]
+    order_flow = np.asarray(metrics["order_flow_imbalance"])[starts]
 
-    # 4. Calculate 5-minute lookback (300 seconds)
-    metrics = bipower_core.calculate_rolling_metrics(prices, qtys, maker, WINDOW_SIZE)
+    # Log return across the same window the engine consumed: window k spans bars
+    # [k, k + window - 1], so this aligns 1:1 with the metrics above.
+    log_price = np.log(price)
+    return_5m = log_price[starts + window - 1] - log_price[starts]
 
-    # 5. Align X features and y targets
-    # The C++ engine returns arrays shifted by the window size
-    valid_targets = targets[WINDOW_SIZE - 1:]
+    # Order flow normalised by the continuous volatility of the window. BPV is a
+    # variance, so sqrt(BPV) puts OFI on a per-unit-of-risk scale.
+    vol_adjusted_ofi = order_flow / (np.sqrt(bipower) + EPSILON)
 
-    # Slice off the last HORIZON rows because the 1-minute forward targets are undefined there
-    X_RV = np.array(metrics["realized_variance"])[:-HORIZON]
-    X_BPV = np.array(metrics["bipower_variation"])[:-HORIZON]
-    X_Jumps = np.array(metrics["jump_component"])[:-HORIZON]
-    X_OFI = np.array(metrics["order_flow_imbalance"])[:-HORIZON]
-    y_aligned = valid_targets[:-HORIZON]
+    # Jumps are magnitude-only by construction (max(RV - BPV, 0)); signing them
+    # with the lookback direction says whether the shock hit an up- or downtrend.
+    signed_jumps = jumps * np.sign(return_5m)
 
-    # 6. Contextual features
-    # Log return across the same 5-minute window the C++ engine consumed:
-    # window k spans bars [k, k + WINDOW_SIZE - 1], so this array aligns 1:1 with the metrics
-    log_prices = np.log(prices)
-    X_Ret5m = (log_prices[WINDOW_SIZE - 1:] - log_prices[:len(log_prices) - WINDOW_SIZE + 1])[:-HORIZON]
+    X = np.column_stack(
+        (
+            realized_variance,
+            bipower,
+            jumps,
+            order_flow,
+            return_5m,
+            vol_adjusted_ofi,
+            signed_jumps,
+        )
+    )
 
-    # Order flow normalised by the continuous volatility of the window.
-    # BPV is a variance, so sqrt(BPV) puts OFI on a per-unit-of-risk scale.
-    X_OFI_Vol = X_OFI / (np.sqrt(X_BPV) + EPSILON)
+    keep = usable[starts + window - 1]
+    return X[keep], y_all[starts + window - 1][keep], starts[keep]
 
-    # Jumps are magnitude-only by construction (max(RV - BPV, 0)).
-    # Signing them with the lookback direction tells the trees whether the
-    # shock happened into an up-trend or a down-trend.
-    X_Signed_Jumps = X_Jumps * np.sign(X_Ret5m)
 
-    # Stack X features into a single 2D matrix
-    X_matrix = np.column_stack((
-        X_RV,
-        X_BPV,
-        X_Jumps,
-        X_OFI,
-        X_Ret5m,
-        X_OFI_Vol,
-        X_Signed_Jumps,
-    ))
+def build_from_csv(
+    csv_path: str,
+    hours: float | None = None,
+    skip_hours: float = 0.0,
+    cache: str | None = None,
+    **kwargs,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Stream a raw trades CSV straight to `(X, y, starts, bars)`.
 
-    return X_matrix, y_aligned
+    Cache handling — including the refusal to reuse a cache built over a
+    different slice — is `sequence_matrix.load_or_build_bars`'s job, so both
+    pipelines fail the same way on the same mistake.
+    """
+    bars = seq.load_or_build_bars(csv_path, hours=hours, skip_hours=skip_hours, cache=cache)
+    X, y, starts = build_training_matrix(bars, **kwargs)
+    return X, y, starts, bars
+
 
 if __name__ == "__main__":
-    print("Streaming data chunk...")
-    lazy_pipeline = get_lazy_feeder(FILE_PATH)
-    feeder = stream_hourly_chunks(lazy_pipeline, chunk_hours=2) # Load 2 hours to ensure enough data
+    import argparse
 
-    chunk = next(feeder)
+    from data_feeder import FILE_PATH
 
-    print("Building X/y training matrix...")
-    X, y = build_training_matrix(chunk)
+    parser = argparse.ArgumentParser(description="Smoke-test the tabular matrix builder.")
+    parser.add_argument("--csv", default=FILE_PATH)
+    parser.add_argument("--hours", type=float, default=8.0)
+    parser.add_argument("--cache", default=None, help="optional .npz bar cache")
+    parser.add_argument("--label-mode", default="triple_barrier", choices=seq.LABEL_MODES)
+    args = parser.parse_args()
 
-    positives = int((y == 1).sum())
-    print("✅ Matrix Built Successfully!")
+    print(f"Streaming {args.hours} hours from {args.csv} ...")
+    X, y, starts, bars = build_from_csv(
+        args.csv, hours=args.hours, cache=args.cache, label_mode=args.label_mode
+    )
+
+    print("✅ Matrix built successfully")
     print(f"X matrix shape: {X.shape}")
     print(f"y target shape: {y.shape}")
-    print(f"Positive class (fwd return > {FEE_THRESHOLD:.2%}): {positives:,} / {len(y):,} ({positives / len(y):.2%})")
+    print(
+        f"Windows resolved by a horizontal barrier: {len(y):,} "
+        f"({len(y) / max(len(bars['price']) - WINDOW_SIZE - HORIZON + 1, 1):.2%} of the population)"
+    )
+    print(f"Upper barrier first (y = 1): {int(y.sum()):,} / {len(y):,} ({y.mean():.2%})")

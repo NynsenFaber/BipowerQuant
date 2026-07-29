@@ -10,13 +10,11 @@ This module therefore deliberately depends on nothing but Polars and NumPy —
 no `bipower_core`, no torch — so the exact same code runs inside a Google Colab
 runtime (where the C++ extension is not compiled) and locally.
 
-Target definition, lookback length and horizon mirror `ml_matrix.py` bar for bar
-so the PatchTST numbers are read against the same problem the trees solved.
-
-The one deliberate difference: bars are placed on a **complete** 1-second grid
-(empty seconds carry a forward-filled price and zero volume), so a "60-bar"
-horizon is always literally 60 seconds. `ml_matrix.py` uses `group_by_dynamic`,
-which silently drops trade-less seconds — see Phase 5 of TODO.md.
+Bars are placed on a **complete** 1-second grid (empty seconds carry a
+forward-filled price and zero volume), so a "60-bar" horizon is always literally
+60 seconds. On BTC/USDT ~15% of seconds contain no trade at all, so a builder
+that emits bars only for traded seconds — as `ml_matrix.py` originally did —
+gives a horizon of an arbitrary wall-clock length.
 """
 
 from __future__ import annotations
@@ -30,15 +28,22 @@ import polars as pl
 
 from data_feeder import CSV_SCHEMA
 
-# --- Problem definition (kept identical to ml_matrix.py) ----------------------
+# --- Problem definition ------------------------------------------------------
 
-# Minimum forward return required to call a move "profitable" (5 bp round-trip).
-FEE_THRESHOLD = 0.0005
+# Half-width of the horizontal barriers, as a simple return. 5 bp is roughly one
+# taker round-trip on Binance spot, so a position that touches the upper barrier
+# before the lower one covers its own costs.
+BARRIER = 0.0005
+
+# Legacy alias. The original target was `forward_return > FEE_THRESHOLD`, which
+# is retained under `label_mode="fee_threshold"` so old checkpoints still score.
+FEE_THRESHOLD = BARRIER
 
 # 5-minute lookback window, in 1-second bars. This is PatchTST's sequence length L.
 WINDOW_SIZE = 300
 
-# 1-minute forward prediction horizon, in 1-second bars.
+# 1-minute forward horizon, in 1-second bars. Under the triple-barrier method
+# this is the *vertical* barrier: the deadline by which a side must be decided.
 HORIZON = 60
 
 # pi / 2, the Bipower Variation scale factor (mirrors PI_FACTOR in math_engine.hpp).
@@ -47,7 +52,7 @@ PI_FACTOR = 1.5707963267948966
 # Guards the volatility normalisation against flat windows (mirrors ml_matrix.py).
 EPSILON = 1e-8
 
-# The tabular feature set, in the order ml_matrix.py stacks it.
+# The tabular feature set, in the order build_tabular_features stacks it.
 TABULAR_FEATURE_NAMES = [
     "Realized Variance",
     "Bipower Variation",
@@ -60,23 +65,40 @@ TABULAR_FEATURE_NAMES = [
 
 # --- Channel layout ----------------------------------------------------------
 
-# Per-bar quantities fed to the model as independent channels. Channels 1-3 are
-# exactly the per-bar increments the C++ engine sums into RV, BPV and OFI, so
-# PatchTST sees the un-aggregated version of the tabular features: attention over
-# patches can learn a time-weighted, non-linear alternative to a plain sum.
+# Per-bar quantities fed to the model as independent channels.
 #
-# Verified numerically: a plain rolling sum of `realized_var` / `bipower` over 300
-# bars reproduces bipower_core's RV / BPV to ~1e-15, up to the leading-edge terms
-# the C++ loop skips (it starts its returns at i > 0 and its pairs at i > 1).
-CHANNEL_NAMES = [
-    "log_return",    # r_t = log p_t - log p_{t-1}
-    "realized_var",  # r_t^2                   -> window sum = RV
-    "bipower",       # (pi/2) |r_t| |r_{t-1}|  -> window sum = BPV
-    "ofi",           # signed traded volume    -> window sum = OFI
-    "log_volume",    # log1p(total qty in the bar)
-    "log_trades",    # log1p(number of trades in the bar)
-]
+# "raw" is the default and the point of the sequence baseline: give the network
+# the two primitive observables — the signed price increment and the signed
+# traded volume — and let attention build whatever aggregate it wants out of
+# them. `realized_var` and `bipower` are deterministic pointwise functions of
+# `log_return` (r^2 and (pi/2)|r||r_prev|), so handing them over adds no
+# information the model could not compute in its first layer; it only spends
+# channel width. Two channels instead of six buys the depth back.
+#
+# "full" is the original six-channel layout, kept so checkpoints trained with it
+# still load and score. Channels 1-3 are exactly the per-bar increments the C++
+# engine sums into RV, BPV and OFI — verified numerically to ~1e-15 against
+# `bipower_core`, up to the leading-edge terms the C++ loop skips.
+CHANNEL_SETS = {
+    "raw": [
+        "log_return",    # r_t = log p_t - log p_{t-1}
+        "ofi",           # signed traded volume    -> window sum = OFI
+    ],
+    "full": [
+        "log_return",
+        "realized_var",  # r_t^2                   -> window sum = RV
+        "bipower",       # (pi/2) |r_t| |r_{t-1}|  -> window sum = BPV
+        "ofi",
+        "log_volume",    # log1p(total qty in the bar)
+        "log_trades",    # log1p(number of trades in the bar)
+    ],
+}
+DEFAULT_CHANNEL_SET = "raw"
+CHANNEL_NAMES = CHANNEL_SETS[DEFAULT_CHANNEL_SET]
 N_CHANNELS = len(CHANNEL_NAMES)
+
+# Column layout of the "full" set, which `build_tabular_features` indexes into.
+FULL_CHANNEL_NAMES = CHANNEL_SETS["full"]
 
 
 # --- Second-bar construction -------------------------------------------------
@@ -270,8 +292,15 @@ def load_bars(path: str | Path) -> dict:
 # --- Channels, targets, windows ----------------------------------------------
 
 
-def build_channels(bars: dict) -> np.ndarray:
-    """Turn the bar series into the (n_bars, M) channel matrix PatchTST reads."""
+def build_channels(bars: dict, channel_set: str = DEFAULT_CHANNEL_SET) -> np.ndarray:
+    """Turn the bar series into the (n_bars, M) channel matrix PatchTST reads.
+
+    `channel_set` selects a layout from `CHANNEL_SETS`; a list of channel names
+    is also accepted, which is what lets a checkpoint rebuild the exact matrix it
+    was trained on from its recorded `data_meta["channels"]`.
+    """
+    names = CHANNEL_SETS[channel_set] if isinstance(channel_set, str) else list(channel_set)
+
     price = bars["price"]
     log_p = np.log(price)
 
@@ -281,17 +310,19 @@ def build_channels(bars: dict) -> np.ndarray:
     abs_r = np.abs(r)
     prev_abs_r = np.concatenate(([0.0], abs_r[:-1]))
 
-    channels = np.column_stack(
-        (
-            r,
-            r * r,
-            PI_FACTOR * abs_r * prev_abs_r,
-            bars["ofi"],
-            np.log1p(bars["qty"]),
-            np.log1p(bars["n_trades"]),
-        )
-    )
-    assert channels.shape[1] == N_CHANNELS
+    available = {
+        "log_return": r,
+        "realized_var": r * r,
+        "bipower": PI_FACTOR * abs_r * prev_abs_r,
+        "ofi": bars["ofi"],
+        "log_volume": np.log1p(bars["qty"]),
+        "log_trades": np.log1p(bars["n_trades"]),
+    }
+    unknown = [n for n in names if n not in available]
+    if unknown:
+        raise ValueError(f"Unknown channel(s) {unknown}; known: {sorted(available)}")
+
+    channels = np.column_stack([available[n] for n in names])
     return np.ascontiguousarray(channels, dtype=np.float32)
 
 
@@ -301,15 +332,23 @@ def build_tabular_features(
     starts: np.ndarray,
     window: int = WINDOW_SIZE,
 ) -> np.ndarray:
-    """The 7 features `ml_matrix.py` builds, derived from the same channel matrix.
+    """The 7 features `ml_matrix.py` builds, derived from the same bar grid.
 
     This exists so the tabular baselines can be scored and timed on *exactly* the
-    windows PatchTST sees — same bars, same grid, same splits — instead of the
-    near-but-not-identical population `group_by_dynamic` produces.
+    windows PatchTST sees — same bars, same grid, same splits, same labels.
+
+    `channels` must be the **"full"** layout (`build_channels(bars, "full")`),
+    since this indexes its `realized_var` / `bipower` / `ofi` columns by position.
 
     The window offsets reproduce the C++ loop precisely: `math_engine.hpp` starts
     its returns at i > 0 and its bipower pairs at i > 1, while OFI covers all bars.
     """
+    if channels.shape[1] != len(FULL_CHANNEL_NAMES):
+        raise ValueError(
+            f"build_tabular_features needs the {len(FULL_CHANNEL_NAMES)}-column "
+            f'"full" channel layout, got {channels.shape[1]} columns. '
+            'Call build_channels(bars, "full").'
+        )
     cumulative = {
         col: np.concatenate(([0.0], np.cumsum(channels[:, col], dtype=np.float64)))
         for col in (1, 2, 3)
@@ -329,6 +368,18 @@ def build_tabular_features(
     vol_adjusted_ofi = order_flow / (np.sqrt(bipower) + EPSILON)
     signed_jumps = jumps * np.sign(return_5m)
 
+    # float64, unlike the channel matrix: these columns span ~20 orders of
+    # magnitude (RV is ~1e-7, OFI is ~1e2) and feed trees rather than a network,
+    # so there is no reason to pay float32's rounding. 30 MB for a month.
+    #
+    # It still does not reproduce `bipower_core` bit for bit. Differencing a
+    # 2.7M-term cumulative sum to recover a 300-term window sum cancels most of
+    # the significant digits, leaving ~5e-8 relative error against the C++ loop's
+    # direct summation. That is invisible in the features and just visible in the
+    # result: XGBoost's split decisions amplify it into ~0.002 of test AUC, well
+    # inside the bootstrap interval but enough that this path and `ml_matrix.py`
+    # print different third decimals. `train_xgboost.py` (the C++ path) is the
+    # one the README quotes.
     return np.column_stack(
         (
             realized_variance,
@@ -339,23 +390,95 @@ def build_tabular_features(
             vol_adjusted_ofi,
             signed_jumps,
         )
-    ).astype(np.float32)
+    )
+
+
+LABEL_MODES = ("triple_barrier", "fee_threshold")
+
+
+def triple_barrier_labels(
+    price: np.ndarray, horizon: int = HORIZON, barrier: float = BARRIER
+) -> np.ndarray:
+    """Lopez de Prado's triple barrier, vectorised over every bar at once.
+
+    From each bar `i`, walk the next `horizon` bars and record which of three
+    barriers the path touches first:
+
+        upper  (profit) : log p_{i+k} - log p_i >  log(1 + barrier)
+        lower  (loss)   : log p_{i+k} - log p_i < -log(1 + barrier)
+        vertical (time) : neither, within k <= horizon
+
+    Returns an int8 array: `+1` upper first, `-1` lower first, `0` vertical.
+    Bars closer than `horizon` to the end of the series have a truncated path and
+    are returned as `0` rather than labelled from partial information.
+
+    Cost is `horizon` vectorised passes over the series rather than a per-bar
+    loop — ~4 s for a month of 1-second bars, against hours for the naive form.
+    """
+    log_p = np.log(np.asarray(price, dtype=np.float64))
+    n = log_p.size
+    theta = np.log1p(barrier)
+
+    never = np.int32(horizon + 1)
+    first_up = np.full(n, never, dtype=np.int32)
+    first_down = np.full(n, never, dtype=np.int32)
+
+    # Descending k, so the last write to any bar is its *smallest* touching k.
+    for k in range(horizon, 0, -1):
+        forward = log_p[k:] - log_p[:-k]
+        first_up[: n - k][forward > theta] = k
+        first_down[: n - k][forward < -theta] = k
+
+    label = np.zeros(n, dtype=np.int8)
+    label[first_up < first_down] = 1
+    label[first_down < first_up] = -1
+    label[max(n - horizon, 0) :] = 0  # truncated paths are not labels
+    return label
 
 
 def build_targets(
-    bars: dict, horizon: int = HORIZON, fee_threshold: float = FEE_THRESHOLD
-) -> np.ndarray:
-    """`y[i] = 1` iff the return from bar i to bar i+horizon clears the fee.
+    bars: dict,
+    horizon: int = HORIZON,
+    barrier: float = BARRIER,
+    label_mode: str = "triple_barrier",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-bar `(y, usable)`, where `y[i]` labels a window *ending* on bar i.
 
-    Entries within `horizon` of the end are undefined and left at 0; no window
-    returned by `valid_window_starts` ever labels against them.
+    `label_mode="triple_barrier"` (default) asks **which side gets touched
+    first**: `y = 1` if the upper barrier is hit before the lower one, `y = 0` if
+    the lower comes first, and `usable = False` where neither is reached inside
+    the horizon. Both classes therefore require the *same* 5 bp move, which is
+    what stops a volatility forecast from scoring on the label: magnitude is
+    constant across the two classes by construction, so only sign is left to
+    predict. The price is that ~79% of windows resolve on the vertical barrier
+    and drop out of the population.
+
+    `label_mode="fee_threshold"` is the original target, `forward_return > 5bp`.
+    It is a **compound event** — a large move happened *and* it went up — and the
+    first conjunct is far easier to forecast than the second, so a model
+    optimising it drifts into predicting volatility. Kept only so checkpoints
+    trained against it still reproduce their published numbers.
+
+    Entries within `horizon` of the end are never usable; no window returned by
+    `valid_window_starts` labels against them in any case.
     """
     price = bars["price"]
-    y = np.zeros(price.size, dtype=np.int8)
-    if price.size > horizon:
-        forward_return = price[horizon:] / price[:-horizon] - 1.0
-        y[:-horizon] = (forward_return > fee_threshold).astype(np.int8)
-    return y
+    n = price.size
+
+    if label_mode == "triple_barrier":
+        side = triple_barrier_labels(price, horizon=horizon, barrier=barrier)
+        return (side > 0).astype(np.int8), side != 0
+
+    if label_mode == "fee_threshold":
+        y = np.zeros(n, dtype=np.int8)
+        usable = np.zeros(n, dtype=bool)
+        if n > horizon:
+            forward_return = price[horizon:] / price[:-horizon] - 1.0
+            y[:-horizon] = (forward_return > barrier).astype(np.int8)
+            usable[:-horizon] = True
+        return y, usable
+
+    raise ValueError(f"label_mode must be one of {LABEL_MODES}, got {label_mode!r}")
 
 
 def valid_window_starts(
@@ -436,12 +559,19 @@ class SequenceDataset:
         return float(labels.mean()) if labels.size else float("nan")
 
     def summary(self) -> str:
+        channels = self.meta.get("channels", CHANNEL_NAMES)
+        mode = self.meta.get("label_mode", "triple_barrier")
         lines = [
             f"bars: {self.channels.shape[0]:,} x {self.channels.shape[1]} channels "
-            f"({', '.join(CHANNEL_NAMES)})",
+            f"({', '.join(channels)})",
             f"window: {self.window} bars | horizon: {self.horizon} bars | "
-            f"threshold: {self.meta.get('fee_threshold', FEE_THRESHOLD):.4%}",
+            f"label: {mode} at +/-{self.meta.get('barrier', BARRIER):.4%}",
         ]
+        if mode == "triple_barrier":
+            lines.append(
+                f"vertical-barrier windows dropped: "
+                f"{1.0 - self.meta.get('touch_rate', float('nan')):.2%} of the population"
+            )
         for name in ("train", "val", "test"):
             if name in self.splits:
                 n = self.splits[name].size
@@ -453,15 +583,24 @@ def build_sequence_dataset(
     bars: dict,
     window: int = WINDOW_SIZE,
     horizon: int = HORIZON,
-    fee_threshold: float = FEE_THRESHOLD,
+    barrier: float = BARRIER,
+    label_mode: str = "triple_barrier",
+    channel_set: str | list[str] = DEFAULT_CHANNEL_SET,
     train_frac: float = 0.7,
     val_frac: float = 0.1,
     train_stride: int = 1,
     val_stride: int = 1,
 ) -> SequenceDataset:
-    """Assemble channels, labels and purged chronological splits from bar data."""
-    channels = build_channels(bars)
-    y = build_targets(bars, horizon=horizon, fee_threshold=fee_threshold)
+    """Assemble channels, labels and purged chronological splits from bar data.
+
+    Order of operations matters and is deliberate: windows are split in time,
+    then purged at the boundaries, then thinned by stride, and only then filtered
+    down to the ones the triple barrier actually labels. Splitting first keeps
+    the boundaries at fixed points in time regardless of how many windows survive
+    the filter, so the purge argument (`window + horizon - 1`) stays exact.
+    """
+    channels = build_channels(bars, channel_set)
+    y, usable = build_targets(bars, horizon=horizon, barrier=barrier, label_mode=label_mode)
     starts = valid_window_starts(channels.shape[0], window=window, horizon=horizon)
     purge = window + horizon - 1
     splits = chronological_split(
@@ -473,25 +612,161 @@ def build_sequence_dataset(
         val_stride=val_stride,
     )
 
+    # A window is labelled by the bar it ends on, so that is where `usable` is read.
+    splits = {name: s[usable[s + window - 1]] for name, s in splits.items()}
+    empty = [name for name, s in splits.items() if s.size == 0]
+    if empty:
+        raise ValueError(
+            f"Split(s) {empty} have no labelled windows left. With "
+            f"label_mode={label_mode!r} and barrier={barrier:.4%}, no path in that "
+            "period touched a horizontal barrier — widen the horizon, narrow the "
+            "barrier, or stream more tape."
+        )
+
+    channel_names = (
+        CHANNEL_SETS[channel_set] if isinstance(channel_set, str) else list(channel_set)
+    )
     meta = dict(bars.get("meta", {}))
     meta.update(
         {
             "window": window,
             "horizon": horizon,
-            "fee_threshold": fee_threshold,
-            "channels": list(CHANNEL_NAMES),
+            "barrier": barrier,
+            "label_mode": label_mode,
+            "channels": list(channel_names),
+            "channel_set": channel_set if isinstance(channel_set, str) else "custom",
             "train_frac": train_frac,
             "val_frac": val_frac,
             "train_stride": train_stride,
             "val_stride": val_stride,
             "purge": purge,
             "n_windows": int(starts.size),
+            "touch_rate": float(usable[starts + window - 1].mean()),
             "split_sizes": {k: int(v.size) for k, v in splits.items()},
         }
     )
     return SequenceDataset(
         channels=channels, y=y, splits=splits, window=window, horizon=horizon, meta=meta
     )
+
+
+# --- Evaluation helper -------------------------------------------------------
+#
+# Lives here rather than in `patchtst_model.py` because it must be importable
+# without torch: the tabular trainers need it, and so does a Colab cell running
+# before the model is built. It is NumPy-only for the same reason as the rest of
+# this module.
+
+
+def block_bootstrap_auc(
+    y_true: np.ndarray,
+    score: np.ndarray,
+    n_boot: int = 400,
+    block: int = WINDOW_SIZE + HORIZON,
+    seed: int = 7,
+) -> dict:
+    """Moving-block bootstrap confidence interval for ROC-AUC.
+
+    An i.i.d. bootstrap is wrong here and flatteringly so. Consecutive windows
+    share 299 of their 300 bars and their labels are driven by overlapping
+    forward paths, so resampling single windows treats ~360 correlated
+    observations as 360 independent ones and returns an interval several times
+    too narrow. Resampling contiguous blocks of `window + horizon` windows keeps
+    each block internally intact, so the interval reflects the number of
+    genuinely independent episodes in the split rather than its row count.
+
+    Returns the interval plus `p_le_half`, the share of resamples at or below
+    0.5 — the number to read when asking whether an edge exists at all.
+    """
+    y_true = np.asarray(y_true)
+    score = np.asarray(score)
+    n = y_true.size
+    if n <= block:
+        raise ValueError(f"Need more than {block} windows to block-bootstrap, got {n}")
+
+    rng = np.random.default_rng(seed)
+    n_blocks = max(1, n // block)
+    offsets = np.arange(block)
+    samples = np.empty(n_boot)
+    for i in range(n_boot):
+        picks = rng.integers(0, n - block, n_blocks)
+        idx = (picks[:, None] + offsets).ravel()
+        truth = y_true[idx]
+        # A resample that happens to be single-class leaves AUC undefined.
+        samples[i] = (
+            _roc_auc(truth, score[idx]) if 0 < truth.sum() < truth.size else np.nan
+        )
+
+    samples = samples[~np.isnan(samples)]
+    return {
+        "lo": float(np.percentile(samples, 2.5)),
+        "hi": float(np.percentile(samples, 97.5)),
+        "p_le_half": float((samples <= 0.5).mean()),
+        "n_boot": int(samples.size),
+        "block": int(block),
+    }
+
+
+def _roc_auc(y_true: np.ndarray, score: np.ndarray) -> float:
+    from sklearn.metrics import roc_auc_score
+
+    return float(roc_auc_score(y_true, score))
+
+
+def dataset_kwargs_from(data_meta: dict) -> dict:
+    """Recover the dataset recipe a checkpoint recorded, for `build_sequence_dataset`.
+
+    Every consumer of a checkpoint needs this, and getting a default wrong here
+    means silently scoring a model against a window population it never saw.
+
+    The two defaults doing real work are for checkpoints written before the
+    triple-barrier switch: they carry no `label_mode`, so they fall back to the
+    `fee_threshold` target they were actually trained on, and their `channels`
+    list restores the 6-channel layout. Both keep old weights reproducing their
+    published numbers instead of being scored against a label they never saw.
+    """
+    return {
+        "window": data_meta.get("window", WINDOW_SIZE),
+        "horizon": data_meta.get("horizon", HORIZON),
+        "barrier": data_meta.get("barrier", data_meta.get("fee_threshold", BARRIER)),
+        "label_mode": data_meta.get("label_mode", "fee_threshold"),
+        "channel_set": data_meta.get("channels", DEFAULT_CHANNEL_SET),
+        "train_frac": data_meta.get("train_frac", 0.7),
+        "val_frac": data_meta.get("val_frac", 0.1),
+        "train_stride": data_meta.get("train_stride", 1),
+        "val_stride": data_meta.get("val_stride", 1),
+    }
+
+
+def load_or_build_bars(
+    csv_path: str | Path,
+    hours: float | None = None,
+    skip_hours: float = 0.0,
+    cache: str | Path | None = None,
+) -> dict:
+    """Bars for the requested slice, from `cache` if it holds that exact slice.
+
+    The mismatch check is the point of this function. Reusing a month-long cache
+    for a `--hours 8` request would report a full-month result under an 8-hour
+    label, which is the one failure mode that produces a plausible-looking wrong
+    number instead of an error. Every entry point that accepts both `--hours` and
+    a cache path goes through here.
+    """
+    if cache is not None and Path(cache).exists():
+        bars = load_bars(cache)
+        cached = (bars["meta"].get("hours"), bars["meta"].get("skip_hours", 0.0))
+        if cached != (hours, skip_hours):
+            raise ValueError(
+                f"Bar cache {cache} covers hours={cached[0]}, skip_hours={cached[1]}, "
+                f"but hours={hours}, skip_hours={skip_hours} was requested. "
+                "Delete the cache, point at a different file, or drop the --hours flag."
+            )
+        return bars
+
+    bars = load_second_bars(csv_path, hours=hours, skip_hours=skip_hours)
+    if cache is not None:
+        save_bars(bars, cache)
+    return bars
 
 
 def build_from_csv(
@@ -502,21 +777,7 @@ def build_from_csv(
     **dataset_kwargs,
 ) -> SequenceDataset:
     """One-shot CSV -> dataset, reusing `cache` when it covers the same slice."""
-    if cache is not None and Path(cache).exists():
-        bars = load_bars(cache)
-        cached = (bars["meta"].get("hours"), bars["meta"].get("skip_hours", 0.0))
-        if cached != (hours, skip_hours):
-            # Silently scoring a different slice than the caller asked for is the
-            # one failure that would look like a valid result.
-            raise ValueError(
-                f"Bar cache {cache} covers hours={cached[0]}, skip_hours={cached[1]}, "
-                f"but hours={hours}, skip_hours={skip_hours} was requested. "
-                "Delete the cache or point at a different file."
-            )
-    else:
-        bars = load_second_bars(csv_path, hours=hours, skip_hours=skip_hours)
-        if cache is not None:
-            save_bars(bars, cache)
+    bars = load_or_build_bars(csv_path, hours=hours, skip_hours=skip_hours, cache=cache)
     return build_sequence_dataset(bars, **dataset_kwargs)
 
 
@@ -529,10 +790,18 @@ if __name__ == "__main__":
     parser.add_argument("--csv", default=FILE_PATH)
     parser.add_argument("--hours", type=float, default=8.0)
     parser.add_argument("--cache", default=None, help="optional .npz bar cache")
+    parser.add_argument("--label-mode", default="triple_barrier", choices=LABEL_MODES)
+    parser.add_argument("--channels", default=DEFAULT_CHANNEL_SET, choices=sorted(CHANNEL_SETS))
     args = parser.parse_args()
 
     print(f"Streaming {args.hours} hours from {args.csv} ...")
-    dataset = build_from_csv(args.csv, hours=args.hours, cache=args.cache)
+    dataset = build_from_csv(
+        args.csv,
+        hours=args.hours,
+        cache=args.cache,
+        label_mode=args.label_mode,
+        channel_set=args.channels,
+    )
     print("✅ Sequence dataset built")
     print(dataset.summary())
     print(

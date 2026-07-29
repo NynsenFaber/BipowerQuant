@@ -51,26 +51,6 @@ def log_results(model_name: str, acc: float, f1: float, roc_auc: float, extra: s
         handle.write("-" * 50 + "\n")
 
 
-def _warn_if_pipelines_diverged() -> None:
-    """The two pipelines define the same problem twice — check they still agree.
-
-    `sequence_matrix.py` cannot import `ml_matrix.py` (that would pull in the C++
-    extension and break Colab), so the constants are duplicated. Locally the
-    extension exists, which makes this the one place the copies can be compared.
-    """
-    try:
-        import ml_matrix
-    except Exception:  # bipower_core not built — nothing to compare against
-        return
-    for name in ("FEE_THRESHOLD", "WINDOW_SIZE", "HORIZON"):
-        tabular, sequence = getattr(ml_matrix, name), getattr(seq, name)
-        if tabular != sequence:
-            print(
-                f"⚠️  {name} differs: ml_matrix.py has {tabular}, sequence_matrix.py has "
-                f"{sequence}. PatchTST and XGBoost are not solving the same problem."
-            )
-
-
 def _check_consistency(data_meta: dict, dataset: seq.SequenceDataset, strict: bool) -> list[str]:
     """Compare the rebuilt bar series against the one the checkpoint used."""
     problems = []
@@ -119,8 +99,6 @@ def main() -> None:
             f"produces, and drop it in {DEFAULT_WEIGHTS.parent}/."
         )
 
-    _warn_if_pipelines_diverged()
-
     print(f"1. Loading checkpoint {weights_path} ...")
     model, payload = load_checkpoint(weights_path, map_location=args.device)
     print(describe_checkpoint(payload))
@@ -134,13 +112,7 @@ def main() -> None:
         hours=hours,
         skip_hours=data_meta.get("skip_hours", 0.0),
         cache=args.bars_cache,
-        window=data_meta.get("window", seq.WINDOW_SIZE),
-        horizon=data_meta.get("horizon", seq.HORIZON),
-        fee_threshold=data_meta.get("fee_threshold", seq.FEE_THRESHOLD),
-        train_frac=data_meta.get("train_frac", 0.7),
-        val_frac=data_meta.get("val_frac", 0.1),
-        train_stride=data_meta.get("train_stride", 1),
-        val_stride=data_meta.get("val_stride", 1),
+        **seq.dataset_kwargs_from(data_meta),
     )
     print(dataset.summary())
     _check_consistency(data_meta, dataset, strict=not args.allow_mismatch)
@@ -166,9 +138,12 @@ def main() -> None:
     truth = batcher.numpy_labels()
 
     metrics = binary_metrics(truth, probabilities, threshold=args.threshold)
+    ci = seq.block_bootstrap_auc(truth, probabilities)
     print("\n✅ PatchTST Evaluated Successfully")
     print("=========================================")
     print(format_metrics(metrics))
+    print(f"           95% CI [{ci['lo']:.4f}, {ci['hi']:.4f}], "
+          f"P(<=0.5) = {ci['p_le_half']:.3f}")
     print("=========================================")
     print(
         f"windows: {metrics['n_windows']:,} | positives: {metrics['n_positive']:,} | "
@@ -178,7 +153,10 @@ def main() -> None:
     sweep = []
     if not args.no_sweep:
         sweep = threshold_sweep(truth, probabilities)
-        print("\n🔍 Threshold sweep (0.5 is arbitrary for a 7%-positive problem)")
+        print(
+            f"\n🔍 Threshold sweep (base rate {metrics['base_rate']:.2%}, so 0.5 is "
+            "only the right cut if the classes are balanced)"
+        )
         print(f"{'p>=':>6} {'flagged':>9} {'precision':>10} {'recall':>8} {'F1':>7}")
         for row in sweep:
             print(
@@ -194,9 +172,12 @@ def main() -> None:
     if not args.no_log:
         train_meta = payload.get("train_meta", {})
         extra = (
-            f"Split: {args.split} | Target: forward {dataset.horizon // 60}m return > "
-            f"{dataset.meta['fee_threshold']:.4%} | Base rate: {metrics['base_rate']:.2%} | "
+            f"Split: {args.split} | Label: {dataset.meta['label_mode']} at "
+            f"+/-{dataset.meta['barrier']:.4%} over {dataset.horizon}s | "
+            f"Base rate: {metrics['base_rate']:.2%} | "
             f"Always-0 accuracy: {metrics['majority_accuracy']:.4f}\n"
+            f"ROC-AUC 95% CI: [{ci['lo']:.4f}, {ci['hi']:.4f}] | "
+            f"P(AUC <= 0.5) = {ci['p_le_half']:.3f}\n"
             f"Precision: {metrics['precision']:.4f} | Recall: {metrics['recall']:.4f} | "
             f"Flagged: {metrics['n_flagged']:,} / {metrics['n_windows']:,}\n"
             f"Checkpoint: {weights_path.name} ({payload.get('created_utc', 'unknown')}) | "

@@ -22,3 +22,10 @@ Order Flow Imbalance: 0.2338
 Vol-Adjusted OFI: 0.1355
 Signed Jumps: 0.1334
 --------------------------------------------------
+[2026-07-28 19:27:59] PatchTST (Sequence Matrix + Fee Threshold)
+Accuracy: 0.6947 | F1: 0.2380 | ROC-AUC: 0.7407
+Split: test | Target: forward 1m return > 0.0500% | Base rate: 7.11% | Always-0 accuracy: 0.9289
+Precision: 0.1446 | Recall: 0.6710 | Flagged: 176,563 / 535,609
+Checkpoint: patchtst_BTCUSDT_2026-05_full.pt (2026-07-27T22:31:45+00:00) | params: 118,093 | best epoch: 9
+Config: {"d_ff": 128, "d_model": 64, "dropout": 0.2, "eps": 1e-08, "head_dropout": 0.2, "head_hidden": 0, "n_channels": 6, "n_heads": 4, "n_layers": 3, "norm": "batch", "patch_len": 16, "seq_len": 300, "stride": 8, "use_scale_features": true}
+--------------------------------------------------

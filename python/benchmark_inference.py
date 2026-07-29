@@ -162,9 +162,14 @@ def fit_tabular_baselines(
 ):
     """Fit the two baselines exactly as `train_baseline.py` / `train_xgboost.py` do."""
     from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
 
-    # train_baseline.py uses the OFI column alone (index 3 of the 7-feature matrix).
-    logistic = LogisticRegression(class_weight="balanced", max_iter=1000)
+    # train_baseline.py uses the OFI column alone (index 3 of the 7-feature
+    # matrix), standardised — the raw columns span ~20 orders of magnitude.
+    logistic = make_pipeline(
+        StandardScaler(), LogisticRegression(class_weight="balanced", max_iter=1000)
+    )
     logistic.fit(X_train[:, [3]], y_train)
 
     positives = int((y_train == 1).sum())
@@ -172,6 +177,12 @@ def fit_tabular_baselines(
     if positives == 0:
         raise ValueError("No positive windows in the training split.")
 
+    # `n_jobs`, not `nthread`: the latter is a legacy alias that XGBoost's sklearn
+    # wrapper no longer maps onto anything — it lands in **kwargs, leaves n_jobs
+    # at None, and the model quietly uses every core. That silently broke both
+    # halves of this benchmark's premise, since the fitted booster carries its
+    # thread count into `inplace_predict` and was being timed on all cores while
+    # PatchTST ran pinned to one.
     booster = xgboost.XGBClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
@@ -179,7 +190,7 @@ def fit_tabular_baselines(
         scale_pos_weight=negatives / positives,
         eval_metric="logloss",
         random_state=seed,
-        nthread=threads,
+        n_jobs=threads or None,
     )
     booster.fit(X_train, y_train)
     return logistic, booster
@@ -191,7 +202,7 @@ def fit_tabular_baselines(
 def run_benchmark(
     dataset: seq.SequenceDataset,
     model: PatchTSTClassifier,
-    prices: np.ndarray,
+    bars: dict,
     device: torch.device | str = "cpu",
     batch_size: int = 1024,
     single_repeats: int = 200,
@@ -202,8 +213,11 @@ def run_benchmark(
 ) -> dict:
     """Fit the tabular baselines, then time all three models on the test split.
 
-    `prices` is `bars["price"]` — the raw level series, which the channel matrix
-    does not carry (it stores log *returns*) but the tabular features need.
+    `bars` is the dict `sequence_matrix.load_second_bars` returns. Two things are
+    taken from it that `dataset.channels` cannot supply: the raw price *level*
+    series (the channels store log returns), and the full 6-column channel
+    layout the 7 tabular features are summed out of — `dataset.channels` holds
+    whatever set the model was trained on, which is 2 columns by default.
 
     `threads` pins every CPU model to the same core count; see the module
     docstring for why the default is 1 and why raising it hangs on macOS.
@@ -211,6 +225,8 @@ def run_benchmark(
     _assert_openmp_safe()
     device = torch.device(device)
     window = dataset.window
+    prices = bars["price"]
+    full_channels = seq.build_channels(bars, "full")
     rows: list[dict] = []
 
     # Set once, not restored: torch's thread count is global, and putting it back
@@ -223,14 +239,14 @@ def run_benchmark(
 
     probe_start = int(test_starts[0])
     prep = timed(
-        lambda: tabular_features_one_window(dataset.channels, prices, probe_start, window),
+        lambda: tabular_features_one_window(full_channels, prices, probe_start, window),
         warmup=20,
         repeats=single_repeats,
     )
 
-    X_train = seq.build_tabular_features(dataset.channels, prices, train_starts, window)
+    X_train = seq.build_tabular_features(full_channels, prices, train_starts, window)
     bulk_started = time.perf_counter()
-    X_test = seq.build_tabular_features(dataset.channels, prices, test_starts, window)
+    X_test = seq.build_tabular_features(full_channels, prices, test_starts, window)
     prep["amortised_ms"] = (time.perf_counter() - bulk_started) * MILLISECOND / len(test_starts)
     y_train = dataset.labels("train")
     y_test = dataset.labels("test")
@@ -249,8 +265,12 @@ def run_benchmark(
     # -- latency: one window --
     one_tabular = np.ascontiguousarray(X_test[:1])
     one_ofi = np.ascontiguousarray(X_test[:1, [3]])
-    coefficients = logistic.coef_.ravel().astype(np.float64)
-    intercept = float(logistic.intercept_[0])
+    # Fold the scaler into the linear term, so the hand-written NumPy path times
+    # one dot product rather than sklearn's transform stack: standardising then
+    # applying (w, b) is the same affine map as applying (w/sigma, b - w.mu/sigma).
+    scaler, linear = logistic.named_steps["standardscaler"], logistic.named_steps["logisticregression"]
+    coefficients = (linear.coef_.ravel() / scaler.scale_).astype(np.float64)
+    intercept = float(linear.intercept_[0] - coefficients @ scaler.mean_)
 
     rows.append(
         {
@@ -428,20 +448,11 @@ if __name__ == "__main__":
         if args.bars_cache and Path(args.bars_cache).exists()
         else seq.load_second_bars(args.csv, hours=hours)
     )
-    dataset = seq.build_sequence_dataset(
-        bars,
-        window=data_meta.get("window", seq.WINDOW_SIZE),
-        horizon=data_meta.get("horizon", seq.HORIZON),
-        fee_threshold=data_meta.get("fee_threshold", seq.FEE_THRESHOLD),
-        train_frac=data_meta.get("train_frac", 0.7),
-        val_frac=data_meta.get("val_frac", 0.1),
-        train_stride=data_meta.get("train_stride", 1),
-        val_stride=data_meta.get("val_stride", 1),
-    )
+    dataset = seq.build_sequence_dataset(bars, **seq.dataset_kwargs_from(data_meta))
     print(dataset.summary())
     print("\nFitting the tabular baselines on the same windows ...\n")
     results = run_benchmark(
-        dataset, model, bars["price"], device=args.device, batch_size=args.batch_size
+        dataset, model, bars, device=args.device, batch_size=args.batch_size
     )
     print(format_benchmark(results))
     print(f"\nTest ROC-AUC on {results['test_windows']:,} identical windows:")

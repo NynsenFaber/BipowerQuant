@@ -8,8 +8,8 @@ What is kept from the paper
   bars (stride S=8), so the encoder sees N = 37 tokens instead of 300. Attention
   cost drops by ~(300/37)^2 ~ 66x, and each token carries a sub-series with
   local semantics rather than one meaningless second.
-* **Channel independence.** All 6 channels share one set of Transformer weights
-  and are pushed through the encoder as independent univariate series, batched
+* **Channel independence.** Every channel shares one set of Transformer weights
+  and is pushed through the encoder as an independent univariate series, batched
   as (B*M, N, D) exactly as described in the paper's A.1.5.
 * **Instance normalisation.** Each window/channel is standardised before
   patching, which is what makes the model survive the volatility regime shifts
@@ -22,11 +22,16 @@ What is changed for this problem
 * **Head.** The paper's `Flatten + Linear -> T future values` becomes
   `Flatten + Linear -> 1 logit`, trained with `BCEWithLogitsLoss(pos_weight=...)`
   where pos_weight plays the role XGBoost's `scale_pos_weight` plays.
+* **Two raw channels, deeper stack.** The model reads `log_return` and `ofi`
+  only — the two primitive observables. Everything else the tabular pipeline
+  computes (r^2, (pi/2)|r||r_prev|, log volume) is a pointwise function of those
+  two and can be formed in the first layer, so feeding it in explicitly spends
+  channel width to buy nothing. The saved budget goes into depth: 6 encoder
+  layers instead of 3.
 * **Scale features.** Instance normalisation throws away the very thing this
   problem cares about — *how* volatile and *how* imbalanced the window was.
-  The per-window mean and log-std of every channel (2M = 12 numbers, which are
-  essentially the tabular feature set) are standardised and concatenated into
-  the head, so nothing the trees had access to is lost.
+  The per-window mean and log-std of every channel (2M numbers) are standardised
+  and concatenated into the head, so the aggregate scale is still available.
 
 Efficiency
 ----------
@@ -59,15 +64,23 @@ CHECKPOINT_FORMAT = 1
 
 @dataclass
 class PatchTSTConfig:
-    """Everything needed to rebuild the network from a checkpoint."""
+    """Everything needed to rebuild the network from a checkpoint.
 
-    n_channels: int = 6
+    The defaults describe the current model: **2 raw channels, 6 encoder
+    layers**. The earlier configuration fed 6 channels through 3 layers for
+    almost exactly the same parameter budget, but four of those channels
+    (`realized_var`, `bipower`, `log_volume`, `log_trades`) are pointwise
+    functions of the other two, so the width was spent re-encoding information
+    the network already had. Trading it for depth is the whole change.
+    """
+
+    n_channels: int = 2
     seq_len: int = 300
     patch_len: int = 16
     stride: int = 8
     d_model: int = 64
     n_heads: int = 4
-    n_layers: int = 3
+    n_layers: int = 6
     d_ff: int = 128
     dropout: float = 0.2
     head_dropout: float = 0.2
@@ -491,8 +504,14 @@ def describe_checkpoint(payload: dict) -> str:
     if data_meta:
         lines.append(
             f"data:    {data_meta.get('source', '?')} | {data_meta.get('n_bars', '?'):,} bars | "
-            f"window {data_meta.get('window', '?')} | horizon {data_meta.get('horizon', '?')} | "
-            f"threshold {data_meta.get('fee_threshold', '?')}"
+            f"window {data_meta.get('window', '?')} | horizon {data_meta.get('horizon', '?')}"
+        )
+        # Absent on checkpoints predating the switch, which is exactly when it
+        # matters most to say which target the weights were fitted against.
+        lines.append(
+            f"label:   {data_meta.get('label_mode', 'fee_threshold (pre-triple-barrier)')} "
+            f"at +/-{data_meta.get('barrier', data_meta.get('fee_threshold', '?'))} | "
+            f"channels {data_meta.get('channels', '?')}"
         )
     train_meta = payload.get("train_meta", {})
     if train_meta:
