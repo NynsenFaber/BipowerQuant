@@ -9,9 +9,10 @@ validation across months, and a backtest with fees, slippage and FIFO queue posi
 
 **The answer is no**, and the interesting part is how thoroughly no:
 
-* Out of sample the directional model scores **0.51 ROC-AUC**, and its gross P&L before any
-  cost is **0.000 bp per trade**. An earlier version of this project measured 0.546 inside a
-  single month; two-thirds of that was the month, not the market.
+* Out of sample the tabular directional models score **0.51 ROC-AUC** and their gross P&L
+  before any cost is **0.000 bp per trade**. A sequence model (PatchTST) does better, **0.55–
+  0.58**, a real edge by this project's own bar — real, but nowhere near enough: even a side
+  model right 100% of the time can't clear this target's cost (next point).
 * The 5 bp profit target was set to one taker round trip, which is **6 bp**. A predictor told
   the correct answer in advance still loses money. The target was defined below its own cost.
 * What *does* work, robustly and across every month tested, is the thing the project treated
@@ -168,22 +169,31 @@ column: a plain rolling sum of $r_t^2$, with no training and no parameters, is w
 is a good volatility estimator, and that is all it is — which is what $RV$ and $BPV$ were
 designed to be.
 
-**The side — "which barrier first?"** This is the directional question, and it does not
-transfer:
+**The side — "which barrier first?"** This is the directional question, and for the tabular
+models it does not transfer:
 
-| Test month | Logistic (OFI) | Logistic (7 features) | XGBoost |
-| :--- | ---: | ---: | ---: |
-| April | 0.5035 | 0.5053 | 0.5104 |
-| May | 0.4957 | 0.4865 | **0.5332** |
-| June | 0.5087 | 0.5090 | 0.5107 |
+| Test month | Logistic (OFI) | Logistic (7 features) | XGBoost | PatchTST |
+| :--- | ---: | ---: | ---: | ---: |
+| April | 0.5035 | 0.5053 | 0.5104 | 0.5477 |
+| May | 0.4957 | 0.4865 | **0.5332** | **0.5847** |
+| June | 0.5087 | 0.5090 | 0.5107 | 0.5564 |
 
-Between 0.49 and 0.53, with the linear model dipping below a coin flip in May. For
-comparison, the earlier single-month study — training on May's first 70% and testing on
-May's last 20% — reported **0.5462** for the same XGBoost. Train on Jan–April instead and
-test on all of May and it gives 0.5332; on April and June it gives 0.510.
+The tabular models sit between 0.49 and 0.53, with the linear model dipping below a coin
+flip in May. For comparison, the earlier single-month study — training on May's first 70%
+and testing on May's last 20% — reported **0.5462** for the same XGBoost. Train on
+Jan–April instead and test on all of May and it gives 0.5332; on April and June it gives
+0.510.
 
-**That gap is the entire value of adding five months.** A 0.55 measured inside one month was
-not a lie, but it was mostly that month, and the honest out-of-sample figure is 0.51.
+**That gap is the entire value of adding five months of data**, for a model built on a
+feature vector that sums over the lookback. A 0.55 measured inside one month was not a lie,
+but it was mostly that month, and the honest out-of-sample figure for that class of model
+is 0.51.
+
+**PatchTST does not fit that pattern.** It beats every tabular side model in every fold —
+by 0.0373 in April, 0.0515 in May, 0.0457 in June — and clears the 0.52–0.54 line this project
+otherwise treats as the boundary of a real edge (Appendix) on all three months, not just the
+one a single-month study happened to land on. §5.3 and §8 go into why an order-sensitive
+model finds something a sum cannot, and why "real" here still does not mean "tradeable."
 
 ### 3.2 Trading a population you can actually select
 
@@ -426,6 +436,24 @@ One model is trained per fold, on that fold's training months only, and every fo
 may still let through. Its predictions go through the same backtest as everything else; it is
 not evaluated on its own terms anywhere.
 
+Out of sample it is the strongest side model in the project: **0.5477 / 0.5847 / 0.5564**
+ROC-AUC on April / May / June, ahead of the best tabular side model (XGBoost) by
+0.0373–0.0515 in every fold, and clear of the 0.52–0.54 bar this project treats as a real
+edge on all three months rather than the one a single-month study happens to land on. The
+gap is consistent with the reason the model exists: `log_return` and `ofi` are read here as
+*ordered* series, so a window where a sell wall hit early and one where it hit late are
+distinguishable, where the tabular features — sums over the same 300 seconds — see the same
+two numbers either way.
+
+That does not make it tradeable. §3.3's oracle bound is the reason: even a side model that is
+right **100% of the time** nets −0.058 bp per trade once fees, slippage, and overshoot are
+paid, because the 5 bp barrier was set below the 6 bp round trip before any model entered the
+picture. A 0.55–0.58 AUC is a real ranking signal — it is not a 100% hit rate, and no
+achievable hit rate under this target clears its own cost. The finding here is about the
+architecture, not the strategy: PatchTST is worth using the day this project's target is
+redefined to pay for itself (§8, "If you are picking this up"); it does not rescue the
+current one.
+
 ---
 
 ## 6. Getting started
@@ -636,9 +664,15 @@ win but shrinks the number of resolving windows and lengthens the holding period
 the hit rate survives is an empirical question this repository can now answer but has not
 answered at every setting.
 
-**Not established: that the sequence adds anything.** PatchTST is trained and scored through
-the identical folds and backtest, but on a signal indistinguishable from noise there is
-nothing for an architecture comparison to resolve.
+**Established: the sequence architecture finds a real edge the tabular models miss.**
+PatchTST scores **0.5477 / 0.5847 / 0.5564** ROC-AUC on April / May / June as a side model —
+ahead of every tabular side model in every fold, and clear of the 0.52–0.54 line this project
+treats as a real edge, on all three months. Reading `log_return` and `ofi` as ordered series
+recovers information a sum over the same 300 seconds discards. It changes the answer to "does
+the sequence add anything" from no to yes, and it does not change the answer to "is this
+tradeable": §3.3's oracle bound caps the best possible gross P&L under a 5 bp barrier at
++5.943 bp against a 6.001 bp cost regardless of which model picks the side, so this edge is
+real and still not enough on its own.
 
 **A caveat that remains.** Six months of one instrument in one year. The volatility result
 is robust enough that it will very likely hold elsewhere; nothing else here is strong enough
@@ -648,15 +682,18 @@ to be worth generalising.
 
 The honest read is that the interesting object in this repository is the **gate**, not the
 predictor it was built to serve. A 0.78-AUC 60-second volatility forecast that costs one
-rolling sum to compute is worth more than a directional model that does not exist. Sensible
-next moves, in order:
+rolling sum to compute is worth more than a directional edge that costs a Transformer to
+find and still can't pay for a target that was undercut by its own round trip before any
+model touched it. Sensible next moves, in order:
 
 1. **Use the gate for something that pays for volatility rather than direction** — spread
    capture, quoting width, inventory limits. All of them are long volatility-forecast and
    short nothing.
 2. **If you want direction, change the horizon.** Sixty seconds at 5 bp is a regime where
    the cost is the same size as the signal. Minutes-to-hours horizons have proportionally
-   smaller costs and are where directional edges are usually found.
+   smaller costs and are where directional edges are usually found — and PatchTST (§3.1,
+   §5.3), the one model here that already clears this project's own bar for a real edge, is
+   the one worth re-training first once the target is.
 3. **Fix the cost side before the model side.** Passive entry (`--entry maker`) cuts the
    round trip from 6.0 bp to 3.0 bp and is already implemented, queue model included. It does
    not rescue a zero gross, but it changes what a future signal would have to clear.
