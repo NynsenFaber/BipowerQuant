@@ -27,6 +27,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -115,12 +116,17 @@ def train_folds(
     time_budget_hours: float | None = None,
     device: torch.device | str | None = None,
     checkpoint_dir: str | Path | None = None,
+    on_fold_complete: Callable[[str, np.ndarray], None] | None = None,
     verbose: bool = True,
 ) -> tuple[dict[str, np.ndarray], dict]:
     """Fit one model per fold; return per-fold test probabilities and metadata.
 
     `train_stride=None` with `time_budget_hours` set picks the stride from a
     measured throughput probe. Pass `train_stride` explicitly to override.
+
+    `on_fold_complete`, if given, is called with `(fold.name, probs)` right
+    after each fold finishes, so a caller can persist progress incrementally
+    instead of losing the whole run to a crash near the end.
     """
     device = torch.device(device) if device is not None else pick_device()
     channels = seq.build_channels(bars, channel_set)
@@ -217,6 +223,9 @@ def train_folds(
                 },
                 train_meta=train_meta, metrics=metrics,
             )
+
+        if on_fold_complete:
+            on_fold_complete(fold.name, probabilities[fold.name])
 
         del model
         if device.type == "cuda":

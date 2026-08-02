@@ -157,12 +157,156 @@ def _aggregate_to_seconds(lazy: pl.LazyFrame, divisor: int, streaming: bool) -> 
     return _collect(grouped, streaming).sort("ts")
 
 
+def _row_batches(csv_path: Path, batch_size: int):
+    """Yield fixed-size row batches of the four columns we consume.
+
+    Polars renamed this capability mid-1.x: `LazyFrame.collect_batches` is the
+    current spelling and `read_csv_batched` the deprecated one. Colab installs
+    whatever is newest, so both are tried rather than pinning a version and
+    hoping. The modern path also projects to four columns before reading, which
+    is why it is preferred and not merely tolerated.
+    """
+    columns = ["time", "price", "qty", "is_buyer_maker"]
+    lazy = pl.scan_csv(csv_path, has_header=False, schema=CSV_SCHEMA).select(columns)
+
+    if hasattr(lazy, "collect_batches"):
+        # `lazy=True` is load-bearing, not a micro-optimisation: the default
+        # collects the entire result and *then* slices it into batches, which for
+        # a 13 GB month is precisely the allocation this function exists to
+        # avoid. Measured on one month: 1.3 GB streaming vs 5.3 GB eager.
+        try:
+            yield from lazy.collect_batches(chunk_size=batch_size, lazy=True)
+        except TypeError:  # polars without the `lazy` keyword
+            yield from lazy.collect_batches(chunk_size=batch_size)
+        return
+
+    reader = pl.read_csv_batched(  # polars < 1.35
+        csv_path,
+        has_header=False,
+        new_columns=list(CSV_SCHEMA),
+        schema_overrides=list(CSV_SCHEMA.values()),
+        batch_size=batch_size,
+    )
+    while True:
+        batches = reader.next_batches(1)
+        if not batches:
+            return
+        for frame in batches:
+            yield frame.select(columns)
+
+
+def _aggregate_batched(
+    csv_path: Path,
+    divisor: int,
+    start_raw: int,
+    end_raw: int | None,
+    batch_size: int,
+) -> dict:
+    """Fold a trades CSV into per-second bars with hard-bounded memory.
+
+    Why this exists rather than one `group_by`: the lazy path materialises its
+    aggregation through Polars' streaming engine, and whether that engine can
+    actually stream `pl.col("price").sort_by("time").last()` depends on the
+    Polars version. When it cannot, it silently falls back to collecting the
+    whole frame — 185 M rows for the largest month here — and the process dies
+    on a 12 GB runtime. That failure is version-dependent, invisible until it
+    happens, and was what killed the Colab notebook.
+
+    This path reads fixed-size row batches and scatters each into preallocated
+    per-second accumulators, so peak memory is `O(seconds in the month)` plus one
+    batch regardless of file size or Polars version. `np.bincount` does the sums;
+    the last price in a second is simply the last batch row that writes to that
+    slot, which is correct because Binance archives are ordered by trade id, and
+    therefore by time.
+    """
+    n_slots = None
+    price = qty = trades = ofi = None
+    seen_any = False
+
+    for frame in _row_batches(csv_path, batch_size):
+        time_raw = frame["time"].to_numpy()
+
+        keep = time_raw >= start_raw
+        if end_raw is not None:
+            keep &= time_raw < end_raw
+        if not keep.any():
+            # Archives are time-ordered, so once we are past the window we are done.
+            if end_raw is not None and time_raw[0] >= end_raw:
+                break
+            continue
+
+        seconds = (time_raw[keep] // divisor) - (start_raw // divisor)
+        if n_slots is None:
+            # The end of the requested window, or of the file, decides the size.
+            span = (
+                (end_raw - start_raw) // divisor + 1
+                if end_raw is not None
+                else int(seconds.max()) + 1
+            )
+            n_slots = int(span)
+            price = np.full(n_slots, np.nan, dtype=np.float64)
+            qty = np.zeros(n_slots, dtype=np.float64)
+            trades = np.zeros(n_slots, dtype=np.float64)
+            ofi = np.zeros(n_slots, dtype=np.float64)
+        elif end_raw is None and seconds.max() >= n_slots:
+            grow = int(seconds.max()) + 1
+            price = np.concatenate([price, np.full(grow - n_slots, np.nan)])
+            qty = np.concatenate([qty, np.zeros(grow - n_slots)])
+            trades = np.concatenate([trades, np.zeros(grow - n_slots)])
+            ofi = np.concatenate([ofi, np.zeros(grow - n_slots)])
+            n_slots = grow
+
+        seen_any = True
+        batch_qty = frame["qty"].to_numpy()[keep]
+        maker = frame["is_buyer_maker"].to_numpy()[keep]
+
+        price[seconds] = frame["price"].to_numpy()[keep]  # last write per second wins
+        qty += np.bincount(seconds, weights=batch_qty, minlength=n_slots)[:n_slots]
+        trades += np.bincount(seconds, minlength=n_slots)[:n_slots]
+        ofi += np.bincount(
+            seconds, weights=np.where(maker, -batch_qty, batch_qty), minlength=n_slots
+        )[:n_slots]
+        del frame
+
+    if not seen_any:
+        raise ValueError(f"No rows in the requested time range of {csv_path}")
+
+    # Trim trailing slots the file never reached, then forward-fill the gaps.
+    observed_slots = np.flatnonzero(~np.isnan(price))
+    last = int(observed_slots[-1]) + 1
+    price, qty, trades, ofi = price[:last], qty[:last], trades[:last], ofi[:last]
+
+    traded = int(observed_slots.size)
+    filled = np.where(~np.isnan(price), np.arange(price.size), 0)
+    np.maximum.accumulate(filled, out=filled)
+    price = price[filled]
+
+    first_second = start_raw // divisor
+    return {
+        "ts": np.arange(first_second, first_second + price.size, dtype=np.int64),
+        "price": price,
+        "qty": qty.astype(np.float32),
+        "n_trades": trades.astype(np.float32),
+        "ofi": ofi.astype(np.float32),
+        "meta": {
+            "source": csv_path.name,
+            "n_bars": int(price.size),
+            "first_ts": int(first_second),
+            "last_ts": int(first_second + price.size - 1),
+            "traded_seconds": traded,
+            "empty_seconds": int(price.size - traded),
+        },
+    }
+
+
 def load_second_bars(
     csv_path: str | Path,
     hours: float | None = None,
     skip_hours: float = 0.0,
     streaming: bool = True,
     chunk_hours: float | None = None,
+    engine: str = "batched",
+    batch_size: int = 4_000_000,
 ) -> dict:
     """Stream a raw Binance trades CSV into a complete 1-second bar series.
 
@@ -176,9 +320,15 @@ def load_second_bars(
         hours: keep only the first N hours of the file (None = the whole file).
             `hours=8` reproduces the window population `train_xgboost.py` used.
         skip_hours: drop this many hours from the start before applying `hours`.
-        streaming: use the Polars streaming engine (keeps peak RAM flat).
+        streaming: use the Polars streaming engine (`engine="lazy"` only).
         chunk_hours: if set, aggregate in slices of this many hours instead of a
             single pass. Slower (one CSV scan per slice) but bounds memory hard.
+        engine: `"batched"` (default) reads fixed-size row batches and scatters
+            them into preallocated per-second accumulators, so peak memory is
+            bounded by the *month*, not the file, whatever Polars decides to do.
+            `"lazy"` is the original single `group_by`, kept because it is a
+            useful cross-check — the two agree exactly.
+        batch_size: rows per batch for `engine="batched"`. 4 M rows is ~200 MB.
 
     Returns:
         dict of NumPy arrays on a gap-free 1-second grid: `ts`, `price`, `qty`,
@@ -194,6 +344,17 @@ def load_second_bars(
 
     start_raw = int(first_ts) + int(skip_hours * 3600 * divisor)
     end_raw = None if hours is None else start_raw + int(hours * 3600 * divisor)
+
+    if engine == "batched":
+        if chunk_hours is not None:
+            raise ValueError("chunk_hours applies to engine='lazy' only; the batched "
+                             "engine is already bounded by construction.")
+        grid = _aggregate_batched(csv_path, divisor, start_raw, end_raw, batch_size)
+        grid["meta"]["hours"] = hours
+        grid["meta"]["skip_hours"] = skip_hours
+        return grid
+    if engine != "lazy":
+        raise ValueError(f"engine must be 'batched' or 'lazy', got {engine!r}")
 
     def slice_of(lo: int, hi: int | None) -> pl.LazyFrame:
         window = lazy.filter(pl.col("time") >= lo)
@@ -243,7 +404,12 @@ def _to_regular_grid(bars: pl.DataFrame, source: str) -> dict:
     price = price[observed]
 
     def scatter(name: str) -> np.ndarray:
-        out = np.zeros(grid.shape, dtype=np.float64)
+        # float32 for the volume-like series: they are quantities of order 1e0-1e3
+        # that only ever get summed into float64 accumulators downstream, so the
+        # extra 4 bytes a bar buys nothing and costs ~190 MB across six months.
+        # `price` stays float64 — at $1e5 a float32 ULP is one tick, which is the
+        # same size as the thing being predicted.
+        out = np.zeros(grid.shape, dtype=np.float32)
         out[slot] = bars[name].to_numpy()
         return out
 
@@ -301,29 +467,40 @@ def build_channels(bars: dict, channel_set: str = DEFAULT_CHANNEL_SET) -> np.nda
     """
     names = CHANNEL_SETS[channel_set] if isinstance(channel_set, str) else list(channel_set)
 
-    price = bars["price"]
-    log_p = np.log(price)
+    # Built lazily and written straight into the output column, one at a time.
+    # The obvious version — a dict of all six arrays, then column_stack — costs
+    # ~0.8 GB of peak on six months to produce a 0.125 GB two-channel matrix,
+    # because it materialises four float64 series nobody asked for and then
+    # copies the lot. On a 12 GB Colab that headroom is worth having.
+    def log_returns() -> np.ndarray:
+        # r[0] = 0: the first bar has no predecessor, and every window that
+        # actually gets used starts WINDOW_SIZE bars into the series anyway.
+        log_p = np.log(bars["price"])
+        return np.diff(log_p, prepend=log_p[0])
 
-    # r[0] = 0: the first bar has no predecessor, and every window that actually
-    # gets used starts at least WINDOW_SIZE bars into the series anyway.
-    r = np.diff(log_p, prepend=log_p[0])
-    abs_r = np.abs(r)
-    prev_abs_r = np.concatenate(([0.0], abs_r[:-1]))
+    def bipower_terms() -> np.ndarray:
+        abs_r = np.abs(log_returns())
+        out = np.empty_like(abs_r)
+        out[0] = 0.0
+        np.multiply(abs_r[1:], abs_r[:-1], out=out[1:])
+        return np.multiply(out, PI_FACTOR, out=out)
 
-    available = {
-        "log_return": r,
-        "realized_var": r * r,
-        "bipower": PI_FACTOR * abs_r * prev_abs_r,
-        "ofi": bars["ofi"],
-        "log_volume": np.log1p(bars["qty"]),
-        "log_trades": np.log1p(bars["n_trades"]),
+    builders = {
+        "log_return": log_returns,
+        "realized_var": lambda: np.square(log_returns()),
+        "bipower": bipower_terms,
+        "ofi": lambda: bars["ofi"],
+        "log_volume": lambda: np.log1p(bars["qty"]),
+        "log_trades": lambda: np.log1p(bars["n_trades"]),
     }
-    unknown = [n for n in names if n not in available]
+    unknown = [n for n in names if n not in builders]
     if unknown:
-        raise ValueError(f"Unknown channel(s) {unknown}; known: {sorted(available)}")
+        raise ValueError(f"Unknown channel(s) {unknown}; known: {sorted(builders)}")
 
-    channels = np.column_stack([available[n] for n in names])
-    return np.ascontiguousarray(channels, dtype=np.float32)
+    channels = np.empty((bars["price"].size, len(names)), dtype=np.float32)
+    for col, name in enumerate(names):
+        channels[:, col] = builders[name]()
+    return channels
 
 
 def build_tabular_features(
@@ -796,9 +973,9 @@ def concat_bars(parts: list[dict]) -> dict:
     out = {
         "ts": grid,
         "price": np.full(grid.size, np.nan, dtype=np.float64),
-        "qty": np.zeros(grid.size, dtype=np.float64),
-        "n_trades": np.zeros(grid.size, dtype=np.float64),
-        "ofi": np.zeros(grid.size, dtype=np.float64),
+        "qty": np.zeros(grid.size, dtype=np.float32),
+        "n_trades": np.zeros(grid.size, dtype=np.float32),
+        "ofi": np.zeros(grid.size, dtype=np.float32),
     }
     for part in parts:
         lo = int(part["ts"][0]) - first
@@ -835,8 +1012,78 @@ def concat_bars(parts: list[dict]) -> dict:
 
 
 def load_bar_caches(paths: list[str | Path]) -> dict:
-    """Load several `save_bars` caches and splice them into one series."""
-    return concat_bars([load_bars(p) for p in paths])
+    """Load several `save_bars` caches and splice them into one series.
+
+    Loads one month at a time and drops it as soon as it has been copied into the
+    output, rather than holding all of them alongside the result. On six months
+    that is the difference between ~1.6 GB of peak and ~1.0 GB — worth having on
+    a 12 GB Colab runtime, where this runs immediately before the model does.
+    """
+    paths = list(paths)
+    if len(paths) == 1:
+        return load_bars(paths[0])
+
+    # Two cheap passes over metadata first, so the output can be preallocated and
+    # the parts never coexist.
+    spans = []
+    for path in paths:
+        with np.load(path, allow_pickle=False) as raw:
+            ts = raw["ts"]
+            spans.append((int(ts[0]), int(ts[-1]), path))
+    spans.sort()
+    for (_, earlier_end, a), (later_start, _, b) in zip(spans, spans[1:]):
+        if later_start <= earlier_end:
+            raise ValueError(
+                f"Bar series overlap: {Path(a).name} ends at {earlier_end}, "
+                f"{Path(b).name} starts at {later_start}. Passing the same month "
+                "twice would double-count it."
+            )
+
+    first, last = spans[0][0], spans[-1][1]
+    grid = np.arange(first, last + 1, dtype=np.int64)
+    out = {
+        "ts": grid,
+        "price": np.full(grid.size, np.nan, dtype=np.float64),
+        "qty": np.zeros(grid.size, dtype=np.float32),
+        "n_trades": np.zeros(grid.size, dtype=np.float32),
+        "ofi": np.zeros(grid.size, dtype=np.float32),
+    }
+    sources, traded, bounds = [], 0, []
+    for start, end, path in spans:
+        part = load_bars(path)
+        lo = start - first
+        for key in ("price", "qty", "n_trades", "ofi"):
+            out[key][lo : lo + part["ts"].size] = part[key]
+        sources.append(part.get("meta", {}).get("source", Path(path).name))
+        traded += int(part.get("meta", {}).get("traded_seconds", 0))
+        bounds.append([start, end])
+        del part
+
+    missing = np.isnan(out["price"])
+    gaps = int(missing.sum())
+    if gaps:
+        observed = np.where(~missing, np.arange(out["price"].size), 0)
+        np.maximum.accumulate(observed, out=observed)
+        out["price"] = out["price"][observed]
+        del observed
+        if np.isnan(out["price"][0]):
+            raise ValueError("The earliest bar series starts with no price")
+    del missing
+
+    out["meta"] = {
+        "source": " + ".join(sources),
+        "sources": sources,
+        "n_bars": int(grid.size),
+        "first_ts": first,
+        "last_ts": last,
+        "traded_seconds": traded,
+        "empty_seconds": int(grid.size - traded),
+        "gap_seconds": gaps,
+        "hours": None,
+        "skip_hours": 0.0,
+        "part_bounds": bounds,
+    }
+    return out
 
 
 def load_or_build_bars(
