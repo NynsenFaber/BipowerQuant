@@ -20,8 +20,8 @@ depend on activity.
 from __future__ import annotations
 
 import numpy as np
-import bipower_core  # type: ignore
 
+import bipower_core  # type: ignore
 import sequence_matrix as seq
 from sequence_matrix import (  # re-exported so callers have one place to import from
     BARRIER,

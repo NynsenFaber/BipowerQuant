@@ -337,7 +337,13 @@ def load_second_bars(
     csv_path = Path(csv_path)
     lazy = _scan_trades(csv_path)
 
-    first_ts = lazy.select(pl.col("time").min()).collect().item()
+    # A truncated or zero-byte download is the common way to get here, and Polars
+    # reports it as an internal `NoDataError` rather than something that names the
+    # file. Both routes to "this file has no ticks" get the same message.
+    try:
+        first_ts = lazy.select(pl.col("time").min()).collect().item()
+    except pl.exceptions.NoDataError as empty:
+        raise ValueError(f"No rows found in {csv_path}") from empty
     if first_ts is None:
         raise ValueError(f"No rows found in {csv_path}")
     divisor = _time_divisor(int(first_ts))

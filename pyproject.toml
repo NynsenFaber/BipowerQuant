@@ -1,12 +1,10 @@
 [project]
 name = "bipowerquant"
 version = "0.1.0"
-description = "Add your description here"
+description = "Jump-diffusion and microstructure research on tick-level BTC/USDT: a C++ math engine, walk-forward validation, and a cost-aware backtest."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "ipykernel>=7.3.0",
-    "jupyter>=1.1.1",
     "matplotlib>=3.11.0",
     "numpy>=2.5.0",
     "polars>=1.42.1",
@@ -14,3 +12,125 @@ dependencies = [
     "torch>=2.13.0",
     "xgboost>=3.3.0",
 ]
+
+[project.optional-dependencies]
+# Notebook tooling: needed to open `exploratory.ipynb` and the Colab driver, and
+# by nothing that runs in CI. Kept out of the default install so a test run does
+# not pull the whole Jupyter stack. Restore with `uv sync --extra notebook`.
+notebook = [
+    "ipykernel>=7.3.0",
+    "jupyter>=1.1.1",
+]
+
+[dependency-groups]
+test = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+lint = [
+    "ruff>=0.6",
+]
+
+# Nothing here trains on a GPU — the Colab notebook does, in its own runtime with
+# its own install. On Linux, PyPI's torch drags in ~2.5 GB of CUDA libraries that
+# no code path touches, so Linux resolves against the CPU-only index instead.
+# macOS and Windows wheels are already CPU-only and are left alone.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+# --- tests --------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `python/` is a flat directory of modules rather than an installed package, so
+# the import path has to include it. Declaring it here rather than with a
+# `sys.path` hack in conftest keeps pytest resolving the modules by the same
+# rule the scripts themselves use when run from that directory.
+pythonpath = ["python"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+markers = [
+    "slow: deselect with `-m 'not slow'` (trains a model or sweeps a grid)",
+]
+
+# --- coverage -----------------------------------------------------------------
+
+[tool.coverage.run]
+source = ["python"]
+branch = true
+omit = [
+    # Figure generation is plotting code: it is checked by eye against the result
+    # file it renders, and importing matplotlib under coverage buys nothing.
+    "python/make_figures.py",
+    "python/make_walkforward_figures.py",
+    # Entry points whose logic lives in the modules they drive.
+    "python/train_*.py",
+    "python/benchmark_inference.py",
+    "python/sweep_barriers.py",
+    "python/eval_patchtst.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    # `main()` bodies are argparse plumbing over functions that are tested directly.
+    "^def main\\(",
+]
+
+# --- lint ---------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+# Notebooks are exploratory scratch — the cost of keeping them lint-clean is paid
+# on every experiment and buys nothing, since nothing imports them.
+extend-exclude = ["build", ".venv", "notebooks", "*.ipynb"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # import order
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+]
+ignore = [
+    "E501",  # long lines are prose in docstrings, not code
+    # `zip(xs, xs[1:])` is the pairwise idiom used throughout to check adjacent
+    # pairs (fold boundaries, month splices). Its arguments differ in length by
+    # one *by design*, so `strict=True` would raise and `strict=False` is noise.
+    "B905",
+]
+
+[tool.ruff.lint.isort]
+# `python/` is a flat directory of modules rather than an installed package, so
+# without this every local import sorts into the third-party block — putting
+# `import backtest` above `import numpy` and hiding which imports are ours.
+known-first-party = [
+    "backtest", "benchmark_inference", "bipower_core", "data_feeder",
+    "eval_patchtst", "make_figures", "make_walkforward_figures", "ml_matrix",
+    "patchtst_folds", "patchtst_model", "patchtst_train", "sequence_matrix",
+    "sweep_barriers", "train_baseline", "train_patchtst_local", "train_xgboost",
+    "walkforward",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Import order in these three is load-bearing, not stylistic: on macOS, xgboost
+# must be imported before torch or the process segfaults, and no amount of
+# `noqa` on individual lines survives an automatic re-sort of the block.
+# `benchmark_inference.py` documents the measured failure matrix.
+"python/benchmark_inference.py" = ["I001", "E402"]
+"python/make_figures.py" = ["I001", "E402"]
+"tests/conftest.py" = ["I001", "E402"]

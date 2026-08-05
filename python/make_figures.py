@@ -445,8 +445,8 @@ def figure_dataset(bars: dict, path: Path) -> dict:
     # -- what the triple barrier does to the population --
     counts = [(side_w == 1).sum(), (side_w == -1).sum(), (side_w == 0).sum()]
     labels = [
-        f"upper barrier first\n(y = 1)",
-        f"lower barrier first\n(y = 0)",
+        "upper barrier first\n(y = 1)",
+        "lower barrier first\n(y = 0)",
         f"neither, within {seq.HORIZON}s\n(dropped)",
     ]
     left = 0.0

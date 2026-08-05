@@ -15,7 +15,6 @@ non-linear model rather than just the extra inputs.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 from pathlib import Path
 
 from sklearn.linear_model import LogisticRegression
@@ -26,8 +25,8 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 import sequence_matrix as seq
 from data_feeder import FILE_PATH

@@ -1,0 +1,133 @@
+name: CI
+
+# The gate is the `test` job: it builds the C++ extension and runs the suite on
+# Linux, macOS and Windows, and the workflow is green only when all three are.
+# `lint` and `coverage` report alongside it.
+
+on:
+  push:
+    branches: ["main", "add-patchTST"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+# A new push to the same branch supersedes the run in flight. `main` is exempt:
+# its history is what the badge reports, so those runs are left to finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Install exactly what `uv.lock` pins and fail if it has drifted from
+  # `pyproject.toml`, rather than silently re-resolving to something the tests
+  # were never run against. (CPU-only torch is pinned in `pyproject.toml`, not
+  # here — a `PIP_*` variable would have no effect on uv at all.)
+  UV_FROZEN: "1"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report every OS that fails, not just the first. A failure that only
+      # reproduces on Windows is the one worth seeing in full.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --group test
+
+      # MSVC is on the PATH of a `cmd` shell but not of the `pwsh` GitHub uses by
+      # default, so CMake picks no compiler at all on Windows without this.
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build the C++ extension
+        run: uv run python build.py --clean
+
+      - name: Run tests
+        run: >
+          uv run pytest
+          --cov
+          --cov-report=xml
+          --cov-report=term-missing
+          --junitxml=junit-${{ matrix.os }}.xml
+
+      # Uploaded even when the tests fail — a red run is exactly when the report
+      # is worth reading.
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: junit-${{ matrix.os }}.xml
+
+      - name: Upload coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage.xml
+
+  coverage:
+    name: coverage
+    needs: test
+    runs-on: ubuntu-latest
+    # Reports the number; never the reason a PR is blocked. Coverage moves for
+    # reasons that have nothing to do with whether the change is correct.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-ubuntu-latest
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          # Public repositories can upload without a token, but rate limits make
+          # that flaky; add CODECOV_TOKEN as a repository secret to make it
+          # reliable. Absent, this step degrades rather than failing the run.
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      # `--only-group lint` installs ruff and nothing else — linting does not need
+      # torch, and pulling it here would triple the job for no benefit.
+      #
+      # Lint only, not `ruff format --check`. This codebase is hand-formatted to
+      # keep related columns aligned and docstrings readable as prose, and the
+      # formatter would rewrite 27 of 29 files — a diff that buries every real
+      # change under whitespace without catching a single bug.
+      - name: Ruff
+        run: uv run --only-group lint ruff check --output-format=github .

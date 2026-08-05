@@ -12,6 +12,15 @@ compile_commands.json
 __pycache__/
 *.pyc
 
+# Test, coverage and lint artefacts
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit*.xml
+
 # Local data, caches and generated results
 training_logs.txt
 *.csv

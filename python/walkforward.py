@@ -38,8 +38,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -80,16 +80,16 @@ def month_blocks(ts: np.ndarray) -> list[tuple[str, int, int]]:
     """
     stamps = np.asarray(ts, dtype=np.int64)
     blocks, lo = [], 0
-    current = datetime.fromtimestamp(int(stamps[0]), timezone.utc)
+    current = datetime.fromtimestamp(int(stamps[0]), UTC)
     while lo < stamps.size:
         year = current.year + (current.month == 12)
         month = current.month % 12 + 1
-        next_month = int(datetime(year, month, 1, tzinfo=timezone.utc).timestamp())
+        next_month = int(datetime(year, month, 1, tzinfo=UTC).timestamp())
         hi = int(np.searchsorted(stamps, next_month, side="left"))
         blocks.append((current.strftime("%Y-%m"), lo, hi))
         if hi >= stamps.size:
             break
-        lo, current = hi, datetime.fromtimestamp(int(stamps[hi]), timezone.utc)
+        lo, current = hi, datetime.fromtimestamp(int(stamps[hi]), UTC)
     return blocks
 
 

@@ -234,7 +234,7 @@ def figure_backtest(data: dict, path: Path) -> None:
     fig.text(0.008, -0.02,
              "Pooled out-of-sample months, one position at a time, best gate "
              "configuration per model. Trades: "
-             + ", ".join(f"{l} {best[m]['n_trades']:,}" for l, m in zip(labels, models)),
+             + ", ".join(f"{label} {best[m]['n_trades']:,}" for label, m in zip(labels, models)),
              fontsize=8, color=MUTED)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")

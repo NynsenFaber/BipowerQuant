@@ -46,10 +46,10 @@ Flash/mem-efficient kernel automatically.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import torch
@@ -104,7 +104,7 @@ class PatchTSTConfig:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict) -> "PatchTSTConfig":
+    def from_dict(cls, payload: dict) -> PatchTSTConfig:
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in payload.items() if k in known})
 
@@ -258,7 +258,7 @@ class PatchTSTClassifier(nn.Module):
     # -- calibration --
 
     @torch.no_grad()
-    def fit_aux_normalization(self, batcher: "WindowBatcher", batch_size: int = 4096) -> None:
+    def fit_aux_normalization(self, batcher: WindowBatcher, batch_size: int = 4096) -> None:
         """Set the auxiliary-feature standardisation from a (training) split."""
         if not self.cfg.use_scale_features:
             self.aux_fitted.fill_(1.0)
@@ -329,7 +329,7 @@ class WindowBatcher:
     def __len__(self) -> int:
         return int(self.starts.numel())
 
-    def like(self, starts, labels) -> "WindowBatcher":
+    def like(self, starts, labels) -> WindowBatcher:
         """A second view over the same device-resident channel matrix."""
         return WindowBatcher(
             None, starts, labels, self.seq_len, self.device, shared_channels=self.channels
@@ -460,7 +460,7 @@ def save_checkpoint(
     torch.save(
         {
             "format_version": CHECKPOINT_FORMAT,
-            "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "created_utc": datetime.now(UTC).isoformat(timespec="seconds"),
             "config": model.cfg.to_dict(),
             "state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
             "data_meta": data_meta or {},

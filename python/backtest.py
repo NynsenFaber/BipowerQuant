@@ -39,7 +39,7 @@ slippage term are all out of scope.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, field
+from dataclasses import asdict, dataclass
 
 import numpy as np
 

@@ -55,13 +55,13 @@ _TORCH_IMPORTED_FIRST = _sys.platform == "darwin" and "torch" in _sys.modules
 import xgboost  # noqa: E402  — must precede torch; see above
 
 import time  # noqa: E402
-from typing import Callable  # noqa: E402
+from collections.abc import Callable  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import sequence_matrix as seq  # noqa: E402
-from patchtst_model import PatchTSTClassifier  # noqa: E402
+from patchtst_model import PatchTSTClassifier, WindowBatcher  # noqa: E402
 
 
 def _assert_openmp_safe() -> None:
@@ -311,11 +311,9 @@ def run_benchmark(
     # -- latency: PatchTST --
     # One batcher per device, reused: rebuilding it would re-upload the whole
     # channel matrix (64 MB for a month) on every timed configuration.
-    batchers: dict[str, "WindowBatcher"] = {}
+    batchers: dict[str, WindowBatcher] = {}
 
     def patchtst_row(target: torch.device, count: int, repeats: int) -> dict:
-        from patchtst_model import WindowBatcher
-
         model.to(target).eval()
         key = target.type
         if key not in batchers:

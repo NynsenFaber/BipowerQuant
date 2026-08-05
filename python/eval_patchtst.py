@@ -22,18 +22,17 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import torch
 
 import sequence_matrix as seq
 from data_feeder import FILE_PATH
 from patchtst_model import (
+    WindowBatcher,
     binary_metrics,
     describe_checkpoint,
     format_metrics,
     load_checkpoint,
     predict_proba,
     threshold_sweep,
-    WindowBatcher,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

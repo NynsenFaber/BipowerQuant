@@ -1,5 +1,12 @@
 # BipowerQuant
 
+[![CI](https://github.com/NynsenFaber/BipowerQuant/actions/workflows/ci.yml/badge.svg)](https://github.com/NynsenFaber/BipowerQuant/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/NynsenFaber/BipowerQuant/branch/main/graph/badge.svg)](https://codecov.io/gh/NynsenFaber/BipowerQuant)
+[![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
+> If you find some nomenclature obscure, at the end you can find an appendix containing some definitions.
+
 **Can you predict which way Bitcoin moves in the next minute?**
 
 This repository is an honest attempt at that question on **six months of tick-level BTC/USDT
@@ -14,7 +21,7 @@ validation across months, and a backtest with fees, slippage and FIFO queue posi
   0.58**, a real edge by this project's own bar — real, but nowhere near enough: even a side
   model right 100% of the time can't clear this target's cost (next point).
 * The 5 bp profit target was set to one taker round trip, which is **6 bp**. A predictor told
-  the correct answer in advance still loses money. The target was defined below its own cost.
+  the correct answer in advance still loses money. The target was defined below its own cost. (WHY SETTING A TARGET SMALLER THAN THE FEE?)
 * What *does* work, robustly and across every month tested, is the thing the project treated
   as a nuisance: forecasting **whether** a move happens at all, at **0.78 ROC-AUC** — matched
   to within 0.005 by a single rolling sum with no parameters.
@@ -41,6 +48,8 @@ If yes, you buy and exit at the profit target. If no, you would have been stoppe
 That is the label this project predicts.
 
 ### Mathematically
+
+We treat this problem as binary classification. Here we describe how to get the labels.
 
 Let $p_t$ be the log price at second $t$. Fix a barrier width $\theta$ and a deadline $H$.
 From the decision time $t$, define the first-passage times
@@ -464,12 +473,66 @@ current one.
 git clone https://github.com/NynsenFaber/BipowerQuant.git
 cd BipowerQuant
 uv sync                       # or: pip install polars numpy scikit-learn xgboost torch matplotlib
-./build.sh                    # compiles the C++ engine into bipower_core
+python build.py               # compiles the C++ engine into bipower_core
 ```
 
-`build.sh` needs CMake and a C++20 compiler. Only `ml_matrix.py` and the two tabular
-trainers import `bipower_core`; the PatchTST pipeline is pure Polars + NumPy + PyTorch and
-runs without it, which is what lets the same code run in a Colab runtime.
+`build.py` needs CMake 3.18+ and a C++20 compiler, and works the same on Linux, macOS and
+Windows — it is what CI runs. (`./build.sh` still works on Unix and now just forwards to it.)
+Only `ml_matrix.py` and the two tabular trainers import `bipower_core`; the PatchTST pipeline
+is pure Polars + NumPy + PyTorch and runs without it, which is what lets the same code run in
+a Colab runtime.
+
+Jupyter is not installed by default — `uv sync --extra notebook` adds it when you want to
+open `exploratory.ipynb`. On Linux, torch resolves to the CPU-only build: nothing here trains
+on a GPU, and the CUDA wheels add ~2.5 GB that no code path touches.
+
+### Run the tests
+
+```bash
+uv sync --group test
+uv run pytest                 # 241 tests, ~4 seconds
+uv run pytest -m "not slow"   # skip the ones that fit models
+uv run pytest --cov           # with the coverage report
+```
+
+Everything is synthetic and seeded — the suite never touches the 52 GB of tape, so it runs
+anywhere in seconds. The bar fixture is calibrated rather than arbitrary: its volatility puts
+~34% of 60-second windows through the 5 bp barrier, against 39.7% in the real six months,
+because both degenerate regimes hide bugs. If every window resolves, the vertical barrier is
+never exercised and overshoot swamps the barrier width; if almost none do, the side label is
+nearly empty and a broken filter looks fine.
+
+What the suite is actually defending, beyond the arithmetic:
+
+| Property | Why a test rather than a review |
+| :--- | :--- |
+| **The barrier is symmetric** | Inverting the price flips every side and leaves the timing alone. An asymmetry between the two comparisons would manufacture a directional edge out of nothing. |
+| **Positions never overlap** | A simulator that opens one per flagged window counts the same move hundreds of times and inflates Sharpe by ~√overlap — in the flattering direction, which is how it survives a casual read. |
+| **Training ends before testing begins** | Asserted on every fold and scheme. A leak here would not fail anything; it would just raise every AUC in §3. |
+| **The two feature paths agree** | `ml_matrix` (the C++ loop) against `build_tabular_features` (differenced cumulative sums), to the ~5e-8 the cancellation costs. |
+| **The oracle still loses money** | 5 bp of target against a 6 bp round trip, asserted rather than argued. |
+| **A checkpoint round-trips** | `eval_patchtst.py` refuses to score on a recipe mismatch, which is only a safeguard if the recipe survives save/load intact. |
+
+The C++ engine is checked against a NumPy reference written from the formulas rather than
+transcribed from the loop — a transcription would agree with a typo for the same reason the
+typo agrees with itself.
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds the extension and runs the
+suite on **Ubuntu, macOS and Windows**; the badge is green only when all three pass. `lint`
+(ruff) runs alongside it, and coverage uploads to Codecov — reported, never a merge blocker,
+since coverage moves for reasons unrelated to whether a change is correct.
+
+Two details that are load-bearing rather than incidental:
+
+* **Windows needs MSVC put on the PATH explicitly.** GitHub's default shell there is `pwsh`,
+  where the compiler is not visible, so CMake finds no compiler at all without that step.
+* **`conftest.py` imports xgboost before torch and pins torch to one thread.** On macOS the
+  two ship separate OpenMP runtimes and the process segfaults otherwise —
+  `benchmark_inference.py` documents the measured failure matrix. It lives in `conftest`
+  because pytest imports that before collecting anything, which is the only hook early
+  enough to fix the order for the whole suite.
 
 ### Get the data
 
@@ -617,6 +680,8 @@ batch 1 and ~770× faster batched.
 | Tabular models | XGBoost, scikit-learn | the gate, the seven-feature side model, and the OFI control |
 | Sequence model | PyTorch | PatchTST, trained per fold on a Colab GPU |
 | Backtest | NumPy | fees, spread, slippage, FIFO queue position, non-overlapping positions |
+| Tests | pytest + coverage | 241 tests on synthetic data, ~4 s, 88% of the library |
+| CI | GitHub Actions | builds the extension and runs the suite on Linux, macOS and Windows |
 
 Three efficiency notes worth knowing before reading the code:
 
@@ -734,3 +799,9 @@ consecutive windows share 299 of 300 bars and their labels come from overlapping
 paths, so resampling single windows treats hundreds of correlated observations as
 independent and returns an interval several times too narrow. Sharpe intervals resample
 whole days, for the same reason at a coarser scale.
+
+## Appendix: nomenclature
+
+* **bp (basis point):** In finance, a basis point is a unit of measurement used to quantify the change between two percentages. 1 bp is equal to $0.01\%$. In this project, a 5 bp profit target means the price needs to move by 0.05% for the trade to hit the target, and the 6 bp round-trip fee means you pay 0.06% in transaction costs.
+
+* **slippage:** Is the difference between the price you expect a trade to execute at and the price it actually executes at.

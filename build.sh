@@ -1,23 +1,15 @@
 #!/bin/bash
+# Thin wrapper, kept because the README documented this entry point before CI
+# needed to build the same module on Windows. `build.py` is the real script and
+# takes the same arguments on every OS; this only chooses an interpreter.
 set -e
 
-echo "Starting build process..."
-rm -f *.so
-rm -f python/*.so  # Also clean the python directory
-rm -rf build/
-mkdir -p build
-cd build
+if [ -x ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+else
+    PYTHON="python"
+fi
 
-cmake .. 
-make
-
-cp compile_commands.json ..
-# Output the compiled module directly into your python folder
-cp bipower_core*.so ../python/
-cd ..
-
-echo "Build complete. Testing Python import..."
-# Test it from within the python folder
-cd python
-python -c "import bipower_core; print('✅ bipower_core successfully built and imported!')"
-cd ..
+exec "$PYTHON" "$(dirname "$0")/build.py" --clean "$@"
