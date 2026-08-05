@@ -81,16 +81,16 @@ TABULAR_FEATURE_NAMES = [
 # `bipower_core`, up to the leading-edge terms the C++ loop skips.
 CHANNEL_SETS = {
     "raw": [
-        "log_return",    # r_t = log p_t - log p_{t-1}
-        "ofi",           # signed traded volume    -> window sum = OFI
+        "log_return",  # r_t = log p_t - log p_{t-1}
+        "ofi",  # signed traded volume    -> window sum = OFI
     ],
     "full": [
         "log_return",
         "realized_var",  # r_t^2                   -> window sum = RV
-        "bipower",       # (pi/2) |r_t| |r_{t-1}|  -> window sum = BPV
+        "bipower",  # (pi/2) |r_t| |r_{t-1}|  -> window sum = BPV
         "ofi",
-        "log_volume",    # log1p(total qty in the bar)
-        "log_trades",    # log1p(number of trades in the bar)
+        "log_volume",  # log1p(total qty in the bar)
+        "log_trades",  # log1p(number of trades in the bar)
     ],
 }
 DEFAULT_CHANNEL_SET = "raw"
@@ -353,8 +353,10 @@ def load_second_bars(
 
     if engine == "batched":
         if chunk_hours is not None:
-            raise ValueError("chunk_hours applies to engine='lazy' only; the batched "
-                             "engine is already bounded by construction.")
+            raise ValueError(
+                "chunk_hours applies to engine='lazy' only; the batched "
+                "engine is already bounded by construction."
+            )
         grid = _aggregate_batched(csv_path, divisor, start_raw, end_raw, batch_size)
         grid["meta"]["hours"] = hours
         grid["meta"]["skip_hours"] = skip_hours
@@ -370,9 +372,11 @@ def load_second_bars(
         bars = _aggregate_to_seconds(slice_of(start_raw, end_raw), divisor, streaming)
     else:
         step = int(chunk_hours * 3600 * divisor)
-        last_raw = end_raw if end_raw is not None else int(
-            lazy.select(pl.col("time").max()).collect().item()
-        ) + 1
+        last_raw = (
+            end_raw
+            if end_raw is not None
+            else int(lazy.select(pl.col("time").max()).collect().item()) + 1
+        )
         pieces = []
         cursor = start_raw
         while cursor < last_raw:
@@ -704,9 +708,7 @@ def valid_window_starts(
     """
     n_windows = n_bars - window - horizon + 1
     if n_windows <= 0:
-        raise ValueError(
-            f"Need at least {window + horizon} bars to form one window, got {n_bars}"
-        )
+        raise ValueError(f"Need at least {window + horizon} bars to form one window, got {n_bars}")
     return np.arange(n_windows, dtype=np.int64)
 
 
@@ -788,7 +790,9 @@ class SequenceDataset:
         for name in ("train", "val", "test"):
             if name in self.splits:
                 n = self.splits[name].size
-                lines.append(f"{name:>5}: {n:>9,} windows | positive rate {self.positive_rate(name):.2%}")
+                lines.append(
+                    f"{name:>5}: {n:>9,} windows | positive rate {self.positive_rate(name):.2%}"
+                )
         return "\n".join(lines)
 
 
@@ -836,9 +840,7 @@ def build_sequence_dataset(
             "barrier, or stream more tape."
         )
 
-    channel_names = (
-        CHANNEL_SETS[channel_set] if isinstance(channel_set, str) else list(channel_set)
-    )
+    channel_names = CHANNEL_SETS[channel_set] if isinstance(channel_set, str) else list(channel_set)
     meta = dict(bars.get("meta", {}))
     meta.update(
         {
@@ -906,9 +908,7 @@ def block_bootstrap_auc(
         idx = (picks[:, None] + offsets).ravel()
         truth = y_true[idx]
         # A resample that happens to be single-class leaves AUC undefined.
-        samples[i] = (
-            _roc_auc(truth, score[idx]) if 0 < truth.sum() < truth.size else np.nan
-        )
+        samples[i] = _roc_auc(truth, score[idx]) if 0 < truth.sum() < truth.size else np.nan
 
     samples = samples[~np.isnan(samples)]
     return {

@@ -33,8 +33,9 @@ from patchtst_train import TrainConfig, evaluate, fit, pick_device, set_seed
 
 
 def tiny_config(**overrides) -> PatchTSTConfig:
-    base = dict(n_channels=2, seq_len=32, patch_len=8, stride=4, d_model=16,
-                n_heads=2, n_layers=2, d_ff=32)
+    base = dict(
+        n_channels=2, seq_len=32, patch_len=8, stride=4, d_model=16, n_heads=2, n_layers=2, d_ff=32
+    )
     return PatchTSTConfig(**{**base, **overrides})
 
 
@@ -191,7 +192,7 @@ def test_gathered_windows_match_the_source_channels(bars):
     x, _ = view.gather(torch.arange(3))
 
     for row, start in enumerate(starts):
-        expected = channels[start:start + 32, :].T  # (M, L)
+        expected = channels[start : start + 32, :].T  # (M, L)
         np.testing.assert_allclose(x[row].numpy(), expected, rtol=1e-6)
 
 
@@ -202,8 +203,9 @@ def test_every_window_appears_exactly_once_per_epoch(batcher):
 
 def test_shuffling_reorders_without_losing_windows(batcher):
     generator = torch.Generator().manual_seed(0)
-    shuffled = torch.cat([y for _, y in batcher.iter_batches(64, shuffle=True,
-                                                             generator=generator)])
+    shuffled = torch.cat(
+        [y for _, y in batcher.iter_batches(64, shuffle=True, generator=generator)]
+    )
     ordered = torch.cat([y for _, y in batcher.iter_batches(64)])
 
     assert shuffled.shape == ordered.shape
@@ -256,8 +258,9 @@ def test_predict_proba_returns_probabilities_in_order(batcher):
 
 def test_predict_proba_on_an_empty_split_returns_an_empty_array(bars):
     channels = seq.build_channels(bars, "raw")
-    empty = WindowBatcher(channels, np.array([], dtype=np.int64),
-                          np.array([], dtype=np.int8), seq_len=32)
+    empty = WindowBatcher(
+        channels, np.array([], dtype=np.int64), np.array([], dtype=np.int8), seq_len=32
+    )
 
     assert predict_proba(PatchTSTClassifier(tiny_config()), empty).size == 0
 
@@ -273,7 +276,9 @@ def test_binary_metrics_on_a_perfect_ranking():
 
 def test_binary_metrics_auc_is_nan_for_a_single_class():
     """Undefined rather than 0.5, so a degenerate split cannot pass as a coin flip."""
-    assert np.isnan(binary_metrics(np.ones(4, dtype=int), np.array([0.1, 0.2, 0.8, 0.9]))["roc_auc"])
+    assert np.isnan(
+        binary_metrics(np.ones(4, dtype=int), np.array([0.1, 0.2, 0.8, 0.9]))["roc_auc"]
+    )
 
 
 def test_binary_metrics_threshold_moves_precision_and_recall():
@@ -356,9 +361,14 @@ def test_fit_runs_and_reports_its_history(bars):
 
     set_seed(0)
     model = PatchTSTClassifier(tiny_config())
-    meta = fit(model, train, val,
-               TrainConfig(epochs=2, batch_size=64, eval_batch_size=128, amp=False),
-               device=torch.device("cpu"), verbose=False)
+    meta = fit(
+        model,
+        train,
+        val,
+        TrainConfig(epochs=2, batch_size=64, eval_batch_size=128, amp=False),
+        device=torch.device("cpu"),
+        verbose=False,
+    )
 
     assert meta["epochs_run"] == 2
     assert len(meta["history"]) == 2
@@ -378,16 +388,21 @@ def test_training_reduces_the_loss_on_a_learnable_signal(bars):
     starts = np.arange(0, 600, dtype=np.int64)
     labels = (np.arange(starts.size) % 2 == 0).astype(np.int8)
     for start, label in zip(starts, labels):
-        channels[start:start + 32, 0] = float(label)
+        channels[start : start + 32, 0] = float(label)
 
     train = WindowBatcher(channels, starts, labels, seq_len=32)
     set_seed(0)
     model = PatchTSTClassifier(tiny_config())
 
     before = _loss_on(model, train)
-    fit(model, train, train,
+    fit(
+        model,
+        train,
+        train,
         TrainConfig(epochs=3, batch_size=64, eval_batch_size=128, amp=False, lr=3e-3),
-        device=torch.device("cpu"), verbose=False)
+        device=torch.device("cpu"),
+        verbose=False,
+    )
     after = _loss_on(model, train)
 
     assert after < before
@@ -403,13 +418,16 @@ def test_checkpoint_round_trip_preserves_predictions(batcher, tmp_path):
     model.fit_aux_normalization(batcher, batch_size=128)
     before = predict_proba(model, batcher, batch_size=128)
 
-    path = save_checkpoint(tmp_path / "ckpt.pt", model,
-                           data_meta={"source": "synthetic", "window": 32},
-                           train_meta={"epochs_run": 1}, metrics={"roc_auc": 0.5})
+    path = save_checkpoint(
+        tmp_path / "ckpt.pt",
+        model,
+        data_meta={"source": "synthetic", "window": 32},
+        train_meta={"epochs_run": 1},
+        metrics={"roc_auc": 0.5},
+    )
     reloaded, payload = load_checkpoint(path)
 
-    np.testing.assert_allclose(before, predict_proba(reloaded, batcher, batch_size=128),
-                               atol=1e-6)
+    np.testing.assert_allclose(before, predict_proba(reloaded, batcher, batch_size=128), atol=1e-6)
     assert payload["data_meta"]["source"] == "synthetic"
     assert payload["config"]["seq_len"] == 32
 
@@ -440,8 +458,7 @@ def test_checkpoint_loads_without_unpickling_arbitrary_objects(tmp_path):
 def test_a_checkpoint_from_another_format_is_refused(tmp_path):
     """Loading it would rebuild the wrong network and report plausible numbers."""
     path = tmp_path / "old.pt"
-    torch.save({"format_version": 0, "config": tiny_config().to_dict(),
-                "state_dict": {}}, path)
+    torch.save({"format_version": 0, "config": tiny_config().to_dict(), "state_dict": {}}, path)
 
     with pytest.raises(ValueError, match="format"):
         load_checkpoint(path)
@@ -450,33 +467,49 @@ def test_a_checkpoint_from_another_format_is_refused(tmp_path):
 def test_checkpoint_records_the_data_recipe_that_gates_evaluation(tmp_path):
     """`eval_patchtst.py` refuses to score on a mismatch, so this must round-trip."""
     recipe = {
-        "source": "BTCUSDT-trades-2026-05.csv", "n_bars": 2_678_400,
-        "window": 300, "horizon": 60, "barrier": 0.0005,
-        "label_mode": "triple_barrier", "channels": ["log_return", "ofi"],
+        "source": "BTCUSDT-trades-2026-05.csv",
+        "n_bars": 2_678_400,
+        "window": 300,
+        "horizon": 60,
+        "barrier": 0.0005,
+        "label_mode": "triple_barrier",
+        "channels": ["log_return", "ofi"],
     }
-    path = save_checkpoint(tmp_path / "ckpt.pt", PatchTSTClassifier(tiny_config()),
-                           data_meta=recipe)
+    path = save_checkpoint(
+        tmp_path / "ckpt.pt", PatchTSTClassifier(tiny_config()), data_meta=recipe
+    )
     _, payload = load_checkpoint(path)
 
     assert payload["data_meta"] == recipe
 
 
 def test_describe_checkpoint_names_the_label_mode(tmp_path):
-    _, payload = load_checkpoint(save_checkpoint(
-        tmp_path / "ckpt.pt", PatchTSTClassifier(tiny_config()),
-        data_meta={"source": "s", "n_bars": 10, "label_mode": "triple_barrier",
-                   "barrier": 0.0005, "channels": ["log_return", "ofi"]},
-    ))
+    _, payload = load_checkpoint(
+        save_checkpoint(
+            tmp_path / "ckpt.pt",
+            PatchTSTClassifier(tiny_config()),
+            data_meta={
+                "source": "s",
+                "n_bars": 10,
+                "label_mode": "triple_barrier",
+                "barrier": 0.0005,
+                "channels": ["log_return", "ofi"],
+            },
+        )
+    )
 
     assert "triple_barrier" in describe_checkpoint(payload)
 
 
 def test_describe_checkpoint_flags_pre_triple_barrier_weights(tmp_path):
     """Older checkpoints carry no `label_mode`; scoring them silently would be worse."""
-    _, payload = load_checkpoint(save_checkpoint(
-        tmp_path / "old.pt", PatchTSTClassifier(tiny_config()),
-        data_meta={"source": "s", "n_bars": 10, "channels": ["log_return", "ofi"]},
-    ))
+    _, payload = load_checkpoint(
+        save_checkpoint(
+            tmp_path / "old.pt",
+            PatchTSTClassifier(tiny_config()),
+            data_meta={"source": "s", "n_bars": 10, "channels": ["log_return", "ofi"]},
+        )
+    )
 
     assert "pre-triple-barrier" in describe_checkpoint(payload)
 

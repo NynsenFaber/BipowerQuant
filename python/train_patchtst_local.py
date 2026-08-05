@@ -108,15 +108,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--months", nargs="+", default=DEFAULT_MONTHS,
-                        help="months to use, as YYYY-MM (needs a bar cache for each)")
+    parser.add_argument(
+        "--months",
+        nargs="+",
+        default=DEFAULT_MONTHS,
+        help="months to use, as YYYY-MM (needs a bar cache for each)",
+    )
     parser.add_argument("--data-dir", default=str(REPO_ROOT / "data"))
-    parser.add_argument("--csv-template", default="BTCUSDT-trades-{month}.csv",
-                        help="used to build a missing month's bar cache")
+    parser.add_argument(
+        "--csv-template",
+        default="BTCUSDT-trades-{month}.csv",
+        help="used to build a missing month's bar cache",
+    )
     parser.add_argument("--out", default=str(REPO_ROOT / "data" / "patchtst_probs.npz"))
     parser.add_argument("--checkpoint-dir", default=str(REPO_ROOT / "weights"))
-    parser.add_argument("--resume", action="store_true",
-                        help="skip folds already present in --out")
+    parser.add_argument("--resume", action="store_true", help="skip folds already present in --out")
 
     parser.add_argument("--scheme", default="anchored", choices=wf.SCHEMES)
     parser.add_argument("--train-months", type=int, default=3)
@@ -127,13 +133,18 @@ def main() -> None:
 
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--train-stride", type=int, default=None,
-                        help="fixed stride; omit to let the time budget choose")
+    parser.add_argument(
+        "--train-stride",
+        type=int,
+        default=None,
+        help="fixed stride; omit to let the time budget choose",
+    )
     parser.add_argument("--val-stride", type=int, default=8)
     parser.add_argument("--time-budget-hours", type=float, default=2.0)
     parser.add_argument("--device", default=None, help="mps, cpu, or cuda")
-    parser.add_argument("--threads", type=int, default=0,
-                        help="torch CPU threads; 0 leaves the default")
+    parser.add_argument(
+        "--threads", type=int, default=0, help="torch CPU threads; 0 leaves the default"
+    )
     parser.add_argument("--yes", action="store_true", help="skip the memory confirmation")
     args = parser.parse_args()
 
@@ -181,9 +192,11 @@ def main() -> None:
 
     bars = seq.load_bar_caches(paths)
     meta = bars["meta"]
-    print(f"\n{meta['n_bars']:,} bars | "
-          f"{(meta['last_ts'] - meta['first_ts']) / 86400:.0f} days | "
-          f"peak RSS so far {rss_gb():.1f} GB")
+    print(
+        f"\n{meta['n_bars']:,} bars | "
+        f"{(meta['last_ts'] - meta['first_ts']) / 86400:.0f} days | "
+        f"peak RSS so far {rss_gb():.1f} GB"
+    )
 
     folds = wf.build_folds(bars["ts"], args.scheme, args.train_months)
     print(f"{len(folds)} {args.scheme} fold(s):")
@@ -213,31 +226,40 @@ def main() -> None:
         existing[name] = probs
         out_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(out_path, **existing)
-        print(f"   saved {name} -> {out_path} ({len(existing)} fold(s), "
-              f"peak RSS {rss_gb():.1f} GB)")
+        print(
+            f"   saved {name} -> {out_path} ({len(existing)} fold(s), peak RSS {rss_gb():.1f} GB)"
+        )
 
     started = time.perf_counter()
     _, run_meta = pf.train_folds(
-        bars, folds,
-        window=args.window, horizon=args.horizon, barrier=args.barrier,
-        channel_set=args.channels, config=cfg, train_config=train_cfg,
-        train_stride=args.train_stride, val_stride=args.val_stride,
+        bars,
+        folds,
+        window=args.window,
+        horizon=args.horizon,
+        barrier=args.barrier,
+        channel_set=args.channels,
+        config=cfg,
+        train_config=train_cfg,
+        train_stride=args.train_stride,
+        val_stride=args.val_stride,
         time_budget_hours=None if args.train_stride else args.time_budget_hours,
-        device=device, checkpoint_dir=args.checkpoint_dir,
+        device=device,
+        checkpoint_dir=args.checkpoint_dir,
         on_fold_complete=on_fold,
     )
 
     Path(str(out_path.with_suffix("")) + ".json").write_text(
         json.dumps(run_meta, indent=2, default=float)
     )
-    print(f"\ndone in {(time.perf_counter() - started) / 3600:.2f} h | "
-          f"peak RSS {rss_gb():.1f} GB")
+    print(f"\ndone in {(time.perf_counter() - started) / 3600:.2f} h | peak RSS {rss_gb():.1f} GB")
     print(f"{'fold':<26} {'test ROC-AUC':>13}")
     for name, row in run_meta["folds"].items():
         print(f"{name:<26} {row['roc_auc']:>13.4f}")
-    print(f"\nNow fold these into the backtest:\n"
-          f"  python walkforward.py --bars {' '.join(str(p) for p in paths)} \\\n"
-          f"                        --patchtst-probs {out_path}")
+    print(
+        f"\nNow fold these into the backtest:\n"
+        f"  python walkforward.py --bars {' '.join(str(p) for p in paths)} \\\n"
+        f"                        --patchtst-probs {out_path}"
+    )
 
 
 if __name__ == "__main__":

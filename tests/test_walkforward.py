@@ -31,8 +31,7 @@ def month_timestamps(months: list[str], per_month: int = 200) -> np.ndarray:
         end = datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=UTC)
         span = (end - start).total_seconds()
         step = span / per_month
-        stamps += [int((start + timedelta(seconds=i * step)).timestamp())
-                   for i in range(per_month)]
+        stamps += [int((start + timedelta(seconds=i * step)).timestamp()) for i in range(per_month)]
     return np.array(sorted(stamps), dtype=np.int64)
 
 
@@ -195,20 +194,41 @@ def test_xgb_survives_a_split_with_no_positives():
 # --- pooling ------------------------------------------------------------------
 
 
-def _row(fold, model="xgb", gate="none", q=0.0, n_trades=100, days=(0, 1, 2),
-         pnl=(1.0, -2.0, 3.0), hit=0.5, gross=0.01, net=-5.99):
+def _row(
+    fold,
+    model="xgb",
+    gate="none",
+    q=0.0,
+    n_trades=100,
+    days=(0, 1, 2),
+    pnl=(1.0, -2.0, 3.0),
+    hit=0.5,
+    gross=0.01,
+    net=-5.99,
+):
     return {
-        "fold": fold, "model": model, "gate": gate, "gate_quantile": q,
-        "gate_keep_frac": 1.0, "n_trades": n_trades, "hit_rate": hit,
-        "resolved_share": 0.4, "resolved_hit_rate": 0.51,
-        "gross_bps": gross, "net_bps": net, "cost_bps": 6.0, "mean_hold_s": 42.0,
-        "daily_day": np.array(days), "daily_pnl_bps": np.array(pnl),
+        "fold": fold,
+        "model": model,
+        "gate": gate,
+        "gate_quantile": q,
+        "gate_keep_frac": 1.0,
+        "n_trades": n_trades,
+        "hit_rate": hit,
+        "resolved_share": 0.4,
+        "resolved_hit_rate": 0.51,
+        "gross_bps": gross,
+        "net_bps": net,
+        "cost_bps": 6.0,
+        "mean_hold_s": 42.0,
+        "daily_day": np.array(days),
+        "daily_pnl_bps": np.array(pnl),
     }
 
 
 def test_pooling_groups_by_model_gate_and_threshold():
     rows = [
-        _row("f1", model="xgb"), _row("f2", model="xgb"),
+        _row("f1", model="xgb"),
+        _row("f2", model="xgb"),
         _row("f1", model="logistic"),
     ]
     pooled = wf.pool_daily(rows)

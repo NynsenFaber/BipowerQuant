@@ -45,18 +45,24 @@ def reference_metrics(prices, qtys, is_buyer_maker, window):
     maker = np.asarray(is_buyer_maker, dtype=bool)
 
     if prices.size < window or window < 2:
-        return {k: np.empty(0) for k in
-                ("realized_variance", "bipower_variation", "jump_component",
-                 "order_flow_imbalance")}
+        return {
+            k: np.empty(0)
+            for k in (
+                "realized_variance",
+                "bipower_variation",
+                "jump_component",
+                "order_flow_imbalance",
+            )
+        }
 
     rv, bpv, jumps, ofi = [], [], [], []
     for start in range(prices.size - window + 1):
-        window_prices = prices[start:start + window]
-        window_qty = qtys[start:start + window]
-        window_maker = maker[start:start + window]
+        window_prices = prices[start : start + window]
+        window_qty = qtys[start : start + window]
+        window_maker = maker[start : start + window]
 
         returns = np.diff(np.log(window_prices))
-        rv_w = float(np.sum(returns ** 2))
+        rv_w = float(np.sum(returns**2))
         bpv_w = PI_FACTOR * float(np.sum(np.abs(returns[1:]) * np.abs(returns[:-1])))
 
         rv.append(rv_w)
@@ -81,9 +87,7 @@ def call_engine(prices, qtys, maker, window):
     )
 
 
-@pytest.mark.skipif(
-    os.environ.get("CI") is None, reason="guards the CI build step, not local runs"
-)
+@pytest.mark.skipif(os.environ.get("CI") is None, reason="guards the CI build step, not local runs")
 def test_extension_is_available_in_ci():
     """In CI the extension must be built — a silent skip would hide a broken build."""
     assert hasattr(bipower_core, "calculate_rolling_metrics")
@@ -99,8 +103,9 @@ def test_matches_reference_on_a_hand_checkable_series():
     expected = reference_metrics(prices, qtys, maker, 3)
 
     for key, want in expected.items():
-        np.testing.assert_allclose(out[key], want, rtol=1e-12, atol=1e-15,
-                                   err_msg=f"{key} disagrees with the reference")
+        np.testing.assert_allclose(
+            out[key], want, rtol=1e-12, atol=1e-15, err_msg=f"{key} disagrees with the reference"
+        )
 
 
 def test_ofi_signs_follow_the_taker():
@@ -130,8 +135,9 @@ def test_matches_reference_on_random_series(window, seed):
 
     for key, want in expected.items():
         assert len(out[key]) == n - window + 1, f"{key} has the wrong window count"
-        np.testing.assert_allclose(out[key], want, rtol=1e-10, atol=1e-18,
-                                   err_msg=f"{key} disagrees with the reference")
+        np.testing.assert_allclose(
+            out[key], want, rtol=1e-10, atol=1e-18, err_msg=f"{key} disagrees with the reference"
+        )
 
 
 def test_bipower_is_zero_when_a_window_holds_one_return():
@@ -208,8 +214,7 @@ def test_non_contiguous_input_is_handled():
 
     out = call_engine(strided, qtys, maker, 5)
     expected = reference_metrics(strided, qtys, maker, 5)
-    np.testing.assert_allclose(out["realized_variance"], expected["realized_variance"],
-                               rtol=1e-10)
+    np.testing.assert_allclose(out["realized_variance"], expected["realized_variance"], rtol=1e-10)
 
 
 def test_multidimensional_input_is_rejected():
@@ -243,5 +248,4 @@ def test_agrees_with_the_python_window_sums(bars):
 
     np.testing.assert_allclose(features[:, 0], engine["realized_variance"], rtol=1e-6)
     np.testing.assert_allclose(features[:, 1], engine["bipower_variation"], rtol=1e-6)
-    np.testing.assert_allclose(features[:, 3], engine["order_flow_imbalance"],
-                               rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(features[:, 3], engine["order_flow_imbalance"], rtol=1e-5, atol=1e-4)

@@ -32,15 +32,24 @@ SURFACE, INK, INK_2, MUTED = "#fcfcfb", "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS = "#e1e0d9", "#c3c2b7"
 BLUE, ORANGE, AQUA, PLUM = "#2a78d6", "#eb6834", "#1baf7a", "#8b5fbf"
 
-plt.rcParams.update({
-    "figure.facecolor": SURFACE, "axes.facecolor": SURFACE, "savefig.facecolor": SURFACE,
-    "font.family": "sans-serif",
-    "font.sans-serif": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
-    "text.color": INK, "axes.labelcolor": INK_2,
-    "xtick.color": MUTED, "ytick.color": MUTED,
-    "axes.edgecolor": AXIS, "axes.linewidth": 0.8,
-    "grid.color": GRID, "grid.linewidth": 0.8, "figure.dpi": 160,
-})
+plt.rcParams.update(
+    {
+        "figure.facecolor": SURFACE,
+        "axes.facecolor": SURFACE,
+        "savefig.facecolor": SURFACE,
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
+        "text.color": INK,
+        "axes.labelcolor": INK_2,
+        "xtick.color": MUTED,
+        "ytick.color": MUTED,
+        "axes.edgecolor": AXIS,
+        "axes.linewidth": 0.8,
+        "grid.color": GRID,
+        "grid.linewidth": 0.8,
+        "figure.dpi": 160,
+    }
+)
 
 
 def _clean(ax, axis="y"):
@@ -77,10 +86,17 @@ def figure_walkforward(data: dict, path: Path) -> None:
     ax1.set_ylim(0.45, 0.88)
     ax1.set_ylabel("Test ROC-AUC", fontsize=9)
     _clean(ax1)
-    ax1.legend(frameon=False, fontsize=8.5, labelcolor=INK_2, loc="upper left",
-               bbox_to_anchor=(0, 1.0))
-    ax1.set_title("Gate: will any barrier be touched?", fontsize=10.5, color=INK,
-                  pad=10, loc="left", fontweight="bold")
+    ax1.legend(
+        frameon=False, fontsize=8.5, labelcolor=INK_2, loc="upper left", bbox_to_anchor=(0, 1.0)
+    )
+    ax1.set_title(
+        "Gate: will any barrier be touched?",
+        fontsize=10.5,
+        color=INK,
+        pad=10,
+        loc="left",
+        fontweight="bold",
+    )
 
     # -- right: the side --
     models = list(folds[0]["side_auc"])
@@ -96,16 +112,32 @@ def figure_walkforward(data: dict, path: Path) -> None:
     ax2.set_ylabel("Test ROC-AUC", fontsize=9)
     _clean(ax2)
     ax2.legend(frameon=False, fontsize=8, labelcolor=INK_2, loc="upper left", ncol=1)
-    ax2.set_title("Side: which barrier first?", fontsize=10.5, color=INK,
-                  pad=10, loc="left", fontweight="bold")
+    ax2.set_title(
+        "Side: which barrier first?",
+        fontsize=10.5,
+        color=INK,
+        pad=10,
+        loc="left",
+        fontweight="bold",
+    )
 
     fig.suptitle(
         "Volatility forecasts survive a month they were not trained on. Direction does not.",
-        fontsize=11.5, color=INK, x=0.008, ha="left", y=1.03, fontweight="bold",
+        fontsize=11.5,
+        color=INK,
+        x=0.008,
+        ha="left",
+        y=1.03,
+        fontweight="bold",
     )
-    fig.text(0.008, -0.02, "Each fold trains only on months before its test month "
-             f"({data['config']['scheme']}, {data['config']['train_months']} training months).",
-             fontsize=8, color=MUTED)
+    fig.text(
+        0.008,
+        -0.02,
+        "Each fold trains only on months before its test month "
+        f"({data['config']['scheme']}, {data['config']['train_months']} training months).",
+        fontsize=8,
+        color=MUTED,
+    )
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
@@ -125,33 +157,57 @@ def figure_economics(data: dict, path: Path) -> None:
     ax.fill_between(hits * 100, 0, required, color=ORANGE, alpha=0.12)
 
     ax.axhline(barrier, color=ORANGE, linewidth=1.4, linestyle=(0, (4, 3)))
-    ax.text(74.5, barrier * 1.12, f"the barrier actually used: {barrier:.0f} bp",
-            fontsize=8.5, color=ORANGE, ha="right")
+    ax.text(
+        74.5,
+        barrier * 1.12,
+        f"the barrier actually used: {barrier:.0f} bp",
+        fontsize=8.5,
+        color=ORANGE,
+        ha="right",
+    )
 
     # `resolved_hit_rate`, not `hit_rate`: the break-even identity assumes every
     # trade ends at +B or -B, so the denominator has to exclude positions closed
     # by the clock. Mixing timeouts in drives h below 0.5 and the "required
     # barrier" negative, which is arithmetic nonsense rather than a result.
-    measured = [(r.get("resolved_hit_rate", float("nan")) * 100, r["model"])
-                for r in data["pooled"] if r["gate"] == "none" and r["n_trades"] > 100]
+    measured = [
+        (r.get("resolved_hit_rate", float("nan")) * 100, r["model"])
+        for r in data["pooled"]
+        if r["gate"] == "none" and r["n_trades"] > 100
+    ]
     measured = [m for m in measured if np.isfinite(m[0])]
     lo, hi = ax.get_xlim()
     for hit, _ in measured:
         if lo <= hit <= hi:
-            ax.plot([hit], [barrier], marker="o", markersize=7, color=BLUE,
-                    markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=5)
+            ax.plot(
+                [hit],
+                [barrier],
+                marker="o",
+                markersize=7,
+                color=BLUE,
+                markeredgecolor=SURFACE,
+                markeredgewidth=1.5,
+                zorder=5,
+            )
     if measured:
         best = max(h for h, _ in measured)
         required = cost / (2 * best / 100 - 1) if best > 50 else float("inf")
         if lo <= best <= hi:
-            ax.annotate(f"measured: {best:.1f}%", xy=(best, barrier),
-                        xytext=(best + 2.5, barrier * 4.0), fontsize=9, color=INK,
-                        arrowprops=dict(arrowstyle="-", color=MUTED, linewidth=0.9))
-        note = (f"Expected value per trade is B(2h-1) - c. At c = {cost:.1f} bp, the measured "
-                f"{best:.1f}% hit rate needs a {required:,.0f} bp barrier."
-                if np.isfinite(required) else
-                f"Expected value per trade is B(2h-1) - c. The measured hit rate of "
-                f"{best:.1f}% is at or below a coin flip, so no barrier makes it profitable.")
+            ax.annotate(
+                f"measured: {best:.1f}%",
+                xy=(best, barrier),
+                xytext=(best + 2.5, barrier * 4.0),
+                fontsize=9,
+                color=INK,
+                arrowprops=dict(arrowstyle="-", color=MUTED, linewidth=0.9),
+            )
+        note = (
+            f"Expected value per trade is B(2h-1) - c. At c = {cost:.1f} bp, the measured "
+            f"{best:.1f}% hit rate needs a {required:,.0f} bp barrier."
+            if np.isfinite(required)
+            else f"Expected value per trade is B(2h-1) - c. The measured hit rate of "
+            f"{best:.1f}% is at or below a coin flip, so no barrier makes it profitable."
+        )
     else:
         note = f"Expected value per trade is B(2h-1) - c, with c = {cost:.1f} bp."
 
@@ -160,14 +216,19 @@ def figure_economics(data: dict, path: Path) -> None:
     ax.set_ylim(1, 3000)
     ax.set_xlabel("Hit rate: how often the predicted barrier is touched first (%)", fontsize=9)
     ax.set_ylabel("Barrier needed to break even (bp, log scale)", fontsize=9)
-    ax.set_yticks([1, 3, 10, 30, 100, 300, 1000, 3000],
-                  ["1", "3", "10", "30", "100", "300", "1000", "3000"])
+    ax.set_yticks(
+        [1, 3, 10, 30, 100, 300, 1000, 3000], ["1", "3", "10", "30", "100", "300", "1000", "3000"]
+    )
     _clean(ax)
     ax.text(63, 700, "profitable", fontsize=10, color=AQUA, fontweight="bold")
     ax.text(52.5, 2.2, "unprofitable", fontsize=10, color=ORANGE, fontweight="bold")
     ax.set_title(
         f"A {cost:.1f} bp round trip sets the price of being right",
-        fontsize=11.5, color=INK, pad=12, loc="left", fontweight="bold",
+        fontsize=11.5,
+        color=INK,
+        pad=12,
+        loc="left",
+        fontweight="bold",
     )
     fig.text(0.008, -0.02, note, fontsize=8, color=MUTED)
     fig.tight_layout()
@@ -189,8 +250,9 @@ def figure_backtest(data: dict, path: Path) -> None:
     cost = data["config"]["breakeven_barrier_bps"]
 
     # One row per model: whichever gate configuration did best on net.
-    best = {m: max((r for r in rows if r["model"] == m), key=lambda r: r["net_bps"])
-            for m in models}
+    best = {
+        m: max((r for r in rows if r["model"] == m), key=lambda r: r["net_bps"]) for m in models
+    }
 
     # Two panels, because the two quantities differ by three orders of magnitude:
     # on a scale that shows -6 bp, a gross of +0.006 bp is a sub-pixel bar and
@@ -205,20 +267,27 @@ def figure_backtest(data: dict, path: Path) -> None:
 
     ax1.bar(x, gross, width=0.5, color=AQUA)
     for xi, v in zip(x, gross):
-        ax1.text(xi, v + (span * 0.06 if v >= 0 else -span * 0.06), f"{v:+.3f}",
-                 ha="center", va="bottom" if v >= 0 else "top", fontsize=9, color=INK)
+        ax1.text(
+            xi,
+            v + (span * 0.06 if v >= 0 else -span * 0.06),
+            f"{v:+.3f}",
+            ha="center",
+            va="bottom" if v >= 0 else "top",
+            fontsize=9,
+            color=INK,
+        )
     ax1.axhline(0, color=INK, linewidth=1.2)
     ax1.set_ylim(-span, span)
     ax1.set_xticks(x, labels, fontsize=9)
     ax1.set_ylabel("Basis points per trade", fontsize=9)
     _clean(ax1)
-    ax1.set_title("Gross, before any cost", fontsize=10.5, color=INK,
-                  pad=10, loc="left", fontweight="bold")
+    ax1.set_title(
+        "Gross, before any cost", fontsize=10.5, color=INK, pad=10, loc="left", fontweight="bold"
+    )
 
     ax2.bar(x, net, width=0.5, color=ORANGE)
     for xi, v in zip(x, net):
-        ax2.text(xi, v - cost * 0.045, f"{v:.2f}", ha="center", va="top",
-                 fontsize=9, color=INK)
+        ax2.text(xi, v - cost * 0.045, f"{v:.2f}", ha="center", va="top", fontsize=9, color=INK)
     ax2.axhline(0, color=INK, linewidth=1.2)
     # The round-trip line is labelled in the panel title rather than annotated on
     # the axes: three bars leave no clear space for a caption at that height.
@@ -226,24 +295,42 @@ def figure_backtest(data: dict, path: Path) -> None:
     ax2.set_ylim(-cost * 1.3, cost * 0.12)
     ax2.set_xticks(x, labels, fontsize=9)
     _clean(ax2)
-    ax2.set_title(f"Net, after the {cost:.1f} bp round trip (dashed)", fontsize=10.5,
-                  color=INK, pad=10, loc="left", fontweight="bold")
+    ax2.set_title(
+        f"Net, after the {cost:.1f} bp round trip (dashed)",
+        fontsize=10.5,
+        color=INK,
+        pad=10,
+        loc="left",
+        fontweight="bold",
+    )
 
-    fig.suptitle("Gross P&L is zero, so net P&L is exactly minus the cost",
-                 fontsize=11.5, color=INK, x=0.008, ha="left", y=1.03, fontweight="bold")
-    fig.text(0.008, -0.02,
-             "Pooled out-of-sample months, one position at a time, best gate "
-             "configuration per model. Trades: "
-             + ", ".join(f"{label} {best[m]['n_trades']:,}" for label, m in zip(labels, models)),
-             fontsize=8, color=MUTED)
+    fig.suptitle(
+        "Gross P&L is zero, so net P&L is exactly minus the cost",
+        fontsize=11.5,
+        color=INK,
+        x=0.008,
+        ha="left",
+        y=1.03,
+        fontweight="bold",
+    )
+    fig.text(
+        0.008,
+        -0.02,
+        "Pooled out-of-sample months, one position at a time, best gate "
+        "configuration per model. Trades: "
+        + ", ".join(f"{label} {best[m]['n_trades']:,}" for label, m in zip(labels, models)),
+        fontsize=8,
+        color=MUTED,
+    )
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--result", required=True, help="JSON from walkforward.py --out")
     parser.add_argument("--out", default=str(ASSETS))
     args = parser.parse_args()

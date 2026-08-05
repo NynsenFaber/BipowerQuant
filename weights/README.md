@@ -40,6 +40,7 @@ Inspect one without running an evaluation:
 
 ```python
 from patchtst_model import load_checkpoint, describe_checkpoint
+
 model, payload = load_checkpoint("../weights/patchtst_BTCUSDT_2026-05_full.pt")
 print(describe_checkpoint(payload))
 print(payload["data_meta"]["label_mode"], payload["data_meta"]["channels"])

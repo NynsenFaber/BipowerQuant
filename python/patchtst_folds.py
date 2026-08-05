@@ -149,8 +149,7 @@ def train_folds(
 
     def view(idx: np.ndarray, stride: int = 1) -> WindowBatcher:
         sel = idx[::stride]
-        return WindowBatcher(None, starts[sel], y_side[sel], window, device,
-                             shared_channels=matrix)
+        return WindowBatcher(None, starts[sel], y_side[sel], window, device, shared_channels=matrix)
 
     if train_stride is None:
         if time_budget_hours is None:
@@ -158,20 +157,25 @@ def train_folds(
             projected = float("nan")
         else:
             probe = PatchTSTClassifier(cfg).to(device)
-            rate = estimate_throughput(probe, view(rows[folds[0].name][0]), train_cfg,
-                                       device=device)
+            rate = estimate_throughput(
+                probe, view(rows[folds[0].name][0]), train_cfg, device=device
+            )
             del probe
             total = sum(rows[f.name][0].size for f in folds)
             train_stride, projected = stride_for_budget(
                 total, train_cfg.epochs, rate, time_budget_hours
             )
             if verbose:
-                print(f"measured {rate:,.0f} windows/s | train stride {train_stride} "
-                      f"-> projected upper bound {projected:.1f} h "
-                      f"(budget {time_budget_hours:.1f} h)")
+                print(
+                    f"measured {rate:,.0f} windows/s | train stride {train_stride} "
+                    f"-> projected upper bound {projected:.1f} h "
+                    f"(budget {time_budget_hours:.1f} h)"
+                )
                 if projected > time_budget_hours:
-                    print("!! does not fit even at the maximum stride — lower epochs "
-                          "or shorten the training window")
+                    print(
+                        "!! does not fit even at the maximum stride — lower epochs "
+                        "or shorten the training window"
+                    )
     else:
         projected = float("nan")
 
@@ -183,12 +187,20 @@ def train_folds(
         train_idx, val_idx, test_idx = rows[fold.name]
         if verbose:
             print(f"\n{'=' * 74}\n{fold.name}\n{'=' * 74}")
-            print(f"train {train_idx.size // train_stride:,} (stride {train_stride}) | "
-                  f"val {val_idx.size // val_stride:,} | test {test_idx.size:,}")
+            print(
+                f"train {train_idx.size // train_stride:,} (stride {train_stride}) | "
+                f"val {val_idx.size // val_stride:,} | test {test_idx.size:,}"
+            )
 
         model = PatchTSTClassifier(cfg).to(device)
-        train_meta = fit(model, view(train_idx, train_stride), view(val_idx, val_stride),
-                         train_cfg, device=device, verbose=verbose)
+        train_meta = fit(
+            model,
+            view(train_idx, train_stride),
+            view(val_idx, val_stride),
+            train_cfg,
+            device=device,
+            verbose=verbose,
+        )
 
         probs = predict_proba(model, view(test_idx), batch_size=4096)
         probabilities[fold.name] = probs.astype(np.float32)
@@ -205,23 +217,30 @@ def train_folds(
             "epochs_run": train_meta["epochs_run"],
         }
         if verbose:
-            print(f"test ROC-AUC {metrics['roc_auc']:.4f} on {resolved.sum():,} resolved "
-                  f"of {test_idx.size:,} windows")
+            print(
+                f"test ROC-AUC {metrics['roc_auc']:.4f} on {resolved.sum():,} resolved "
+                f"of {test_idx.size:,} windows"
+            )
 
         if checkpoint_dir:
             slug = fold.name.replace(" ", "").replace("..", "_").replace("->", "TO")
             save_checkpoint(
-                Path(checkpoint_dir) / f"patchtst_{slug}.pt", model,
+                Path(checkpoint_dir) / f"patchtst_{slug}.pt",
+                model,
                 data_meta={
                     "source": bars["meta"].get("source", "?"),
                     "n_bars": int(bars["meta"]["n_bars"]),
                     "first_ts": int(bars["meta"]["first_ts"]),
-                    "window": window, "horizon": horizon, "barrier": barrier,
+                    "window": window,
+                    "horizon": horizon,
+                    "barrier": barrier,
                     "label_mode": "triple_barrier",
                     "channels": list(seq.CHANNEL_SETS[channel_set]),
-                    "fold": fold.as_dict(), "train_stride": train_stride,
+                    "fold": fold.as_dict(),
+                    "train_stride": train_stride,
                 },
-                train_meta=train_meta, metrics=metrics,
+                train_meta=train_meta,
+                metrics=metrics,
             )
 
         if on_fold_complete:
@@ -235,16 +254,20 @@ def train_folds(
     if verbose:
         print(f"\nall folds done in {elapsed:.2f} h")
     return probabilities, {
-        "folds": summary, "train_stride": train_stride,
-        "projected_hours": projected, "elapsed_hours": elapsed,
-        "config": cfg.to_dict(), "train_config": train_cfg.to_dict(),
+        "folds": summary,
+        "train_stride": train_stride,
+        "projected_hours": projected,
+        "elapsed_hours": elapsed,
+        "config": cfg.to_dict(),
+        "train_config": train_cfg.to_dict(),
         "device": str(device),
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--bars", nargs="+", required=True)
     parser.add_argument("--out", required=True, help=".npz of per-fold probabilities")
     parser.add_argument("--scheme", default="anchored", choices=wf.SCHEMES)
@@ -268,14 +291,19 @@ def main() -> None:
 
     channels = seq.CHANNEL_SETS[args.channels]
     probabilities, meta = train_folds(
-        bars, folds,
-        window=args.window, horizon=args.horizon, barrier=args.barrier,
+        bars,
+        folds,
+        window=args.window,
+        horizon=args.horizon,
+        barrier=args.barrier,
         channel_set=args.channels,
         config=PatchTSTConfig(n_channels=len(channels), seq_len=args.window),
         train_config=TrainConfig(epochs=args.epochs, batch_size=args.batch_size),
-        train_stride=args.train_stride, val_stride=args.val_stride,
+        train_stride=args.train_stride,
+        val_stride=args.val_stride,
         time_budget_hours=args.time_budget_hours,
-        device=args.device, checkpoint_dir=args.checkpoint_dir,
+        device=args.device,
+        checkpoint_dir=args.checkpoint_dir,
     )
 
     np.savez_compressed(args.out, **probabilities)

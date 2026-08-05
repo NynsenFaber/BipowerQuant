@@ -73,7 +73,7 @@ def test_the_final_horizon_bars_are_undefined():
     side, _, defined = seq.triple_barrier(price, horizon=horizon, barrier=0.0005)
 
     assert np.all(defined[: 100 - horizon])
-    assert not np.any(defined[100 - horizon:])
+    assert not np.any(defined[100 - horizon :])
     # An undefined bar must not carry a side, or it would be trained on.
     assert np.all(side[~defined] == 0)
 
@@ -138,8 +138,7 @@ def test_triple_barrier_labels_returns_just_the_side(bars):
 
 
 def test_triple_barrier_mode_keeps_only_resolved_windows(bars):
-    y, usable = seq.build_targets(bars, horizon=30, barrier=0.0005,
-                                  label_mode="triple_barrier")
+    y, usable = seq.build_targets(bars, horizon=30, barrier=0.0005, label_mode="triple_barrier")
     side, _, defined = seq.triple_barrier(bars["price"], horizon=30, barrier=0.0005)
 
     np.testing.assert_array_equal(usable, (side != 0) & defined)
@@ -148,8 +147,7 @@ def test_triple_barrier_mode_keeps_only_resolved_windows(bars):
 
 def test_barrier_touched_mode_is_defined_on_every_window(bars):
     """The gate's population is every window, which is the point of the gate."""
-    y, usable = seq.build_targets(bars, horizon=30, barrier=0.0005,
-                                  label_mode="barrier_touched")
+    y, usable = seq.build_targets(bars, horizon=30, barrier=0.0005, label_mode="barrier_touched")
     _, _, defined = seq.triple_barrier(bars["price"], horizon=30, barrier=0.0005)
 
     np.testing.assert_array_equal(usable, defined)
@@ -158,17 +156,18 @@ def test_barrier_touched_mode_is_defined_on_every_window(bars):
 
 def test_gate_is_the_union_of_the_two_side_classes(bars):
     """`barrier_touched` must be exactly "the side label exists"."""
-    _, side_usable = seq.build_targets(bars, horizon=30, barrier=0.0005,
-                                       label_mode="triple_barrier")
-    gate_y, gate_usable = seq.build_targets(bars, horizon=30, barrier=0.0005,
-                                            label_mode="barrier_touched")
+    _, side_usable = seq.build_targets(
+        bars, horizon=30, barrier=0.0005, label_mode="triple_barrier"
+    )
+    gate_y, gate_usable = seq.build_targets(
+        bars, horizon=30, barrier=0.0005, label_mode="barrier_touched"
+    )
 
     np.testing.assert_array_equal(gate_y.astype(bool) & gate_usable, side_usable)
 
 
 def test_fee_threshold_mode_is_a_forward_return_comparison(bars):
-    y, usable = seq.build_targets(bars, horizon=30, barrier=0.0005,
-                                  label_mode="fee_threshold")
+    y, usable = seq.build_targets(bars, horizon=30, barrier=0.0005, label_mode="fee_threshold")
     price = bars["price"]
     expected = (price[30:] / price[:-30] - 1.0) > 0.0005
 
@@ -275,15 +274,16 @@ def test_full_channels_are_pointwise_functions_of_the_raw_two(bars):
     names = seq.CHANNEL_SETS["full"]
     log_return = full[:, names.index("log_return")].astype(np.float64)
 
-    np.testing.assert_allclose(full[:, names.index("realized_var")],
-                               log_return ** 2, rtol=1e-4, atol=1e-12)
+    np.testing.assert_allclose(
+        full[:, names.index("realized_var")], log_return**2, rtol=1e-4, atol=1e-12
+    )
     expected_bipower = np.empty_like(log_return)
     expected_bipower[0] = 0.0
     expected_bipower[1:] = seq.PI_FACTOR * np.abs(log_return[1:]) * np.abs(log_return[:-1])
-    np.testing.assert_allclose(full[:, names.index("bipower")],
-                               expected_bipower, rtol=1e-4, atol=1e-12)
-    np.testing.assert_allclose(full[:, names.index("log_volume")],
-                               np.log1p(bars["qty"]), rtol=1e-5)
+    np.testing.assert_allclose(
+        full[:, names.index("bipower")], expected_bipower, rtol=1e-4, atol=1e-12
+    )
+    np.testing.assert_allclose(full[:, names.index("log_volume")], np.log1p(bars["qty"]), rtol=1e-5)
 
 
 def test_build_channels_accepts_an_explicit_name_list(bars):
@@ -324,9 +324,9 @@ def test_tabular_features_match_a_direct_window_sum(bars):
 
     for row, start in enumerate(starts[:20]):
         # RV sums the window's returns, which begin one bar in.
-        assert features[row, 0] == pytest.approx(rv_col[start + 1:start + window].sum(), rel=1e-6)
+        assert features[row, 0] == pytest.approx(rv_col[start + 1 : start + window].sum(), rel=1e-6)
         # OFI covers every bar of the window.
-        assert features[row, 3] == pytest.approx(ofi_col[start:start + window].sum(), rel=1e-5)
+        assert features[row, 3] == pytest.approx(ofi_col[start : start + window].sum(), rel=1e-5)
 
 
 def test_tabular_feature_identities_hold(bars):

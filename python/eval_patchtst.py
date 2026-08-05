@@ -75,18 +75,28 @@ def _check_consistency(data_meta: dict, dataset: seq.SequenceDataset, strict: bo
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--weights", default=str(DEFAULT_WEIGHTS), help="checkpoint exported by the notebook")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--weights", default=str(DEFAULT_WEIGHTS), help="checkpoint exported by the notebook"
+    )
     parser.add_argument("--csv", default=FILE_PATH, help="raw Binance trades CSV")
     parser.add_argument("--bars-cache", default=None, help="reuse/write a .npz second-bar cache")
     parser.add_argument("--split", default="test", choices=("train", "val", "test"))
-    parser.add_argument("--threshold", type=float, default=0.5, help="probability cut-off for the hard label")
+    parser.add_argument(
+        "--threshold", type=float, default=0.5, help="probability cut-off for the hard label"
+    )
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--device", default="cpu", help="cpu, mps, or cuda")
-    parser.add_argument("--hours", type=float, default=None, help="override the checkpoint's slice length")
+    parser.add_argument(
+        "--hours", type=float, default=None, help="override the checkpoint's slice length"
+    )
     parser.add_argument("--no-sweep", action="store_true", help="skip the threshold sweep table")
     parser.add_argument("--no-log", action="store_true", help="do not append to training_logs.txt")
-    parser.add_argument("--allow-mismatch", action="store_true", help="score even if the data differs")
+    parser.add_argument(
+        "--allow-mismatch", action="store_true", help="score even if the data differs"
+    )
     parser.add_argument("--save-predictions", default=None, help="write probabilities to this .npy")
     args = parser.parse_args()
 
@@ -141,8 +151,7 @@ def main() -> None:
     print("\n✅ PatchTST Evaluated Successfully")
     print("=========================================")
     print(format_metrics(metrics))
-    print(f"           95% CI [{ci['lo']:.4f}, {ci['hi']:.4f}], "
-          f"P(<=0.5) = {ci['p_le_half']:.3f}")
+    print(f"           95% CI [{ci['lo']:.4f}, {ci['hi']:.4f}], P(<=0.5) = {ci['p_le_half']:.3f}")
     print("=========================================")
     print(
         f"windows: {metrics['n_windows']:,} | positives: {metrics['n_positive']:,} | "
@@ -183,7 +192,13 @@ def main() -> None:
             f"params: {model.n_parameters():,} | best epoch: {train_meta.get('best_epoch', '?')}\n"
             f"Config: {json.dumps(payload.get('config', {}), sort_keys=True)}"
         )
-        log_results("PatchTST (Sequence Matrix + Fee Threshold)", metrics["accuracy"], metrics["f1"], metrics["roc_auc"], extra)
+        log_results(
+            "PatchTST (Sequence Matrix + Fee Threshold)",
+            metrics["accuracy"],
+            metrics["f1"],
+            metrics["roc_auc"],
+            extra,
+        )
         print(f"\nAppended to {LOG_PATH}")
 
 

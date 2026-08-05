@@ -68,9 +68,7 @@ def build_training_matrix(
     metrics = rolling_metrics(bars, window)
 
     starts = seq.valid_window_starts(price.size, window=window, horizon=horizon)
-    y_all, usable = seq.build_targets(
-        bars, horizon=horizon, barrier=barrier, label_mode=label_mode
-    )
+    y_all, usable = seq.build_targets(bars, horizon=horizon, barrier=barrier, label_mode=label_mode)
 
     # The engine emits one row per window start, so its output aligns 1:1 with
     # `starts` once the trailing windows without a defined label are dropped.

@@ -98,8 +98,9 @@ def test_the_two_feature_paths_agree(bars):
 
 
 def _fold(train_lo=0, train_hi=10_000, test_lo=10_000, test_hi=12_000):
-    return wf.Fold(name="test", train_lo=train_lo, train_hi=train_hi,
-                   test_lo=test_lo, test_hi=test_hi)
+    return wf.Fold(
+        name="test", train_lo=train_lo, train_hi=train_hi, test_lo=test_lo, test_hi=test_hi
+    )
 
 
 def _touched(n, every=3):

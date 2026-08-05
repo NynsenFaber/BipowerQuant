@@ -221,9 +221,7 @@ class PatchTSTClassifier(nn.Module):
         mean = x.mean(dim=-1, keepdim=True)
         std = x.std(dim=-1, keepdim=True, unbiased=False)
         normed = (x - mean) / (std + self.cfg.eps)
-        aux = torch.cat(
-            [mean.squeeze(-1), torch.log(std.squeeze(-1) + self.cfg.eps)], dim=1
-        )
+        aux = torch.cat([mean.squeeze(-1), torch.log(std.squeeze(-1) + self.cfg.eps)], dim=1)
         return normed, aux
 
     def patchify(self, x: torch.Tensor) -> torch.Tensor:
@@ -321,9 +319,7 @@ class WindowBatcher:
                 .to(self.device)
             )
         self.starts = torch.as_tensor(np.asarray(starts), dtype=torch.long, device=self.device)
-        self.labels = torch.as_tensor(
-            np.asarray(labels), dtype=torch.float32, device=self.device
-        )
+        self.labels = torch.as_tensor(np.asarray(labels), dtype=torch.float32, device=self.device)
         self._offsets = torch.arange(seq_len, device=self.device)
 
     def __len__(self) -> int:

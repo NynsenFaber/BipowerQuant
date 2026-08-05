@@ -51,8 +51,8 @@ def write_trades_csv(path, rows, time_unit: int = 1_000):
 def trades_csv(tmp_path):
     """Four seconds of trades with a deliberate hole at second 2."""
     rows = [
-        (0, 100.0, 1.0, False),   # aggressive buy
-        (0, 100.5, 2.0, True),    # aggressive sell, same second
+        (0, 100.0, 1.0, False),  # aggressive buy
+        (0, 100.5, 2.0, True),  # aggressive sell, same second
         (1, 101.0, 1.5, False),
         # second 2 has no trades at all
         (3, 102.0, 3.0, True),
@@ -128,10 +128,13 @@ def test_order_flow_nets_offsetting_trades_inside_a_second(trades_csv):
 
 
 def test_order_flow_signs_follow_the_taker(tmp_path):
-    path = write_trades_csv(tmp_path / "signs.csv", [
-        (0, 100.0, 2.0, False),  # buyer is taker -> aggressive buy -> +qty
-        (1, 100.0, 3.0, True),   # buyer is maker -> aggressive sell -> -qty
-    ])
+    path = write_trades_csv(
+        tmp_path / "signs.csv",
+        [
+            (0, 100.0, 2.0, False),  # buyer is taker -> aggressive buy -> +qty
+            (1, 100.0, 3.0, True),  # buyer is maker -> aggressive sell -> -qty
+        ],
+    )
     bars = seq.load_second_bars(path)
 
     assert bars["ofi"][0] == pytest.approx(2.0)
@@ -163,8 +166,9 @@ def test_the_two_engines_produce_identical_bars(tmp_path):
     lazy = seq.load_second_bars(path, engine="lazy")
 
     for key in ("ts", "price", "qty", "n_trades", "ofi"):
-        np.testing.assert_allclose(batched[key], lazy[key], rtol=1e-9,
-                                   err_msg=f"engines disagree on {key}")
+        np.testing.assert_allclose(
+            batched[key], lazy[key], rtol=1e-9, err_msg=f"engines disagree on {key}"
+        )
 
 
 def test_a_small_batch_size_does_not_change_the_result(tmp_path):
@@ -176,8 +180,9 @@ def test_a_small_batch_size_does_not_change_the_result(tmp_path):
     tiny = seq.load_second_bars(path, batch_size=7)  # forces many ragged batches
 
     for key in ("ts", "price", "qty", "n_trades", "ofi"):
-        np.testing.assert_allclose(whole[key], tiny[key], rtol=1e-9,
-                                   err_msg=f"batch size changed {key}")
+        np.testing.assert_allclose(
+            whole[key], tiny[key], rtol=1e-9, err_msg=f"batch size changed {key}"
+        )
 
 
 def test_chunked_lazy_aggregation_matches_a_single_pass(tmp_path):

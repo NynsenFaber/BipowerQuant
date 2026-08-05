@@ -274,9 +274,11 @@ def figure_auc(data: dict, path: Path) -> None:
         verdict = "Training now buys something no single feature does"
     ax.set_title(verdict, fontsize=11.5, color=INK, pad=12, loc="left", fontweight="bold")
     fig.text(
-        0.008, 0.005,
+        0.008,
+        0.005,
         f"{data['n_test']:,} held-out windows · BTC/USDT May 2026 · base rate {data['base_rate']:.2%}",
-        fontsize=8, color=MUTED,
+        fontsize=8,
+        color=MUTED,
     )
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
@@ -312,19 +314,31 @@ def figure_decomposition(data: dict, path: Path) -> None:
     ax.set_ylabel("Test ROC-AUC, no training", fontsize=9)
     _clean(ax, x_grid=False)
     ax.legend(
-        frameon=False, fontsize=8.5, labelcolor=INK_2, ncol=2,
-        loc="lower center", bbox_to_anchor=(0.5, 1.005), handlelength=1.2,
-        columnspacing=1.6, borderpad=0,
+        frameon=False,
+        fontsize=8.5,
+        labelcolor=INK_2,
+        ncol=2,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.005),
+        handlelength=1.2,
+        columnspacing=1.6,
+        borderpad=0,
     )
     ax.set_title(
         "The old target could be forecast by volatility alone; the new one cannot",
-        fontsize=11.5, color=INK, pad=30, loc="left", fontweight="bold",
+        fontsize=11.5,
+        color=INK,
+        pad=30,
+        loc="left",
+        fontweight="bold",
     )
     fig.text(
-        0.008, 0.005,
+        0.008,
+        0.005,
         f"Same held-out period. Old target: {old['n']:,} windows, {old['base_rate']:.1%} positive.  "
         f"Triple barrier: {new['n']:,} windows that touched a barrier, {new['base_rate']:.1%} positive.",
-        fontsize=8, color=MUTED,
+        fontsize=8,
+        color=MUTED,
     )
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
@@ -343,8 +357,13 @@ def figure_residual(data: dict, path: Path) -> None:
         vals = [data["models"][name]["topk"][p] for p in pcts]
         ax1.plot(xs, vals, marker="o", markersize=6, linewidth=2, color=color, label=name)
     ax1.axhline(data["base_rate"], color=INK_2, linewidth=1.2, linestyle=(0, (4, 3)))
-    ax1.text(0.02, data["base_rate"] + 0.012,
-             f"base rate {data['base_rate']:.3f}", color=INK_2, fontsize=8.5)
+    ax1.text(
+        0.02,
+        data["base_rate"] + 0.012,
+        f"base rate {data['base_rate']:.3f}",
+        color=INK_2,
+        fontsize=8.5,
+    )
     ax1.set_xticks(xs, [f"top {p}%" for p in pcts], fontsize=9)
     ax1.set_ylabel("Precision", fontsize=9)
     ax1.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.2f}"))
@@ -352,15 +371,28 @@ def figure_residual(data: dict, path: Path) -> None:
     ax1.set_ylim(0, max(0.40, top * 1.25))
     _clean(ax1, x_grid=False)
     ax1.legend(frameon=False, fontsize=8.5, labelcolor=INK_2, loc="upper right")
-    ax1.set_title("Precision in the confident tail", fontsize=10.5, color=INK,
-                  pad=10, loc="left", fontweight="bold")
+    ax1.set_title(
+        "Precision in the confident tail",
+        fontsize=10.5,
+        color=INK,
+        pad=10,
+        loc="left",
+        fontweight="bold",
+    )
 
     all_deciles = []
     for name, color in colors.items():
         d = data["models"][name]["deciles"]
         all_deciles += [v for v in d if not np.isnan(v)]
-        ax2.plot(range(10), d, marker="o", markersize=5, linewidth=2, color=color,
-                 label=f"{name} (mean {np.nanmean(d):.3f})")
+        ax2.plot(
+            range(10),
+            d,
+            marker="o",
+            markersize=5,
+            linewidth=2,
+            color=color,
+            label=f"{name} (mean {np.nanmean(d):.3f})",
+        )
     ax2.axhline(0.5, color=INK_2, linewidth=1.2, linestyle=(0, (4, 3)))
     ax2.set_xticks(range(10), [str(d) for d in range(10)], fontsize=9)
     # Plain ASCII: the bundled sans has no arrow glyph and renders tofu.
@@ -370,8 +402,14 @@ def figure_residual(data: dict, path: Path) -> None:
     ax2.set_ylim(0.5 - span, 0.5 + span)
     _clean(ax2, x_grid=False)
     ax2.legend(frameon=False, fontsize=8.5, labelcolor=INK_2, loc="lower right")
-    ax2.set_title("...and whether it holds across volatility regimes",
-                  fontsize=10.5, color=INK, pad=10, loc="left", fontweight="bold")
+    ax2.set_title(
+        "...and whether it holds across volatility regimes",
+        fontsize=10.5,
+        color=INK,
+        pad=10,
+        loc="left",
+        fontweight="bold",
+    )
 
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
@@ -416,9 +454,15 @@ def figure_dataset(bars: dict, path: Path) -> dict:
         held_out = label in test_months
         color = ORANGE if held_out else BLUE
         ax1.axvspan(day[lo], day[min(hi, n - 1)], color=color, alpha=0.12 if held_out else 0.05)
-        ax1.text((day[lo] + day[min(hi, n - 1)]) / 2, price.max() * 1.005,
-                 label[-2:] + ("  (test)" if held_out else ""),
-                 ha="center", va="bottom", fontsize=8, color=color if held_out else MUTED)
+        ax1.text(
+            (day[lo] + day[min(hi, n - 1)]) / 2,
+            price.max() * 1.005,
+            label[-2:] + ("  (test)" if held_out else ""),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=color if held_out else MUTED,
+        )
     ax1.set_ylabel("BTC/USDT", fontsize=9)
     ax1.set_ylim(price.min() * 0.99, price.max() * 1.05)
     _clean(ax1, x_grid=False)
@@ -426,20 +470,28 @@ def figure_dataset(bars: dict, path: Path) -> dict:
         f"{len(months)} month{'s' if len(months) != 1 else ''} — {n:,} one-second bars "
         f"over {days:.0f} days"
         + (f"; {len(test_months)} held out by walk-forward" if test_months else ""),
-        fontsize=11.5, color=INK, pad=10, loc="left", fontweight="bold",
+        fontsize=11.5,
+        color=INK,
+        pad=10,
+        loc="left",
+        fontweight="bold",
     )
 
     # -- activity: how much of the tape is actually empty --
     hourly = bars["n_trades"][: (n // 3600) * 3600].reshape(-1, 3600)
-    ax2.fill_between(np.arange(hourly.shape[0]) / 24.0, hourly.sum(axis=1),
-                     color=INK_2, linewidth=0, alpha=0.85)
+    ax2.fill_between(
+        np.arange(hourly.shape[0]) / 24.0, hourly.sum(axis=1), color=INK_2, linewidth=0, alpha=0.85
+    )
     ax2.set_ylabel("trades / hour", fontsize=9)
     _clean(ax2, x_grid=False)
     ax2.set_title(
         f"{meta['traded_seconds']:,} seconds carry a trade; "
         f"{meta['empty_seconds']:,} ({meta['empty_seconds'] / n:.1%}) carry none "
         "and are forward-filled",
-        fontsize=9.5, color=INK_2, pad=8, loc="left",
+        fontsize=9.5,
+        color=INK_2,
+        pad=8,
+        loc="left",
     )
 
     # -- what the triple barrier does to the population --
@@ -455,10 +507,17 @@ def figure_dataset(bars: dict, path: Path) -> dict:
     for value, label, color, drop in zip(counts, labels, (BLUE, ORANGE, GRID), (0.44, 1.02, 0.44)):
         share = value / side_w.size
         ax3.barh([0], [share], left=left, height=0.55, color=color)
-        ax3.text(left + share / 2, 0, f"{share:.1%}", ha="center", va="center",
-                 fontsize=9.5, color=INK if color is GRID else SURFACE, fontweight="bold")
-        ax3.text(left + share / 2, -drop, label, ha="center", va="top",
-                 fontsize=8, color=INK_2)
+        ax3.text(
+            left + share / 2,
+            0,
+            f"{share:.1%}",
+            ha="center",
+            va="center",
+            fontsize=9.5,
+            color=INK if color is GRID else SURFACE,
+            fontweight="bold",
+        )
+        ax3.text(left + share / 2, -drop, label, ha="center", va="top", fontsize=8, color=INK_2)
         left += share
     ax3.set_xlim(0, 1)
     ax3.set_ylim(-1.75, 0.5)
@@ -466,7 +525,10 @@ def figure_dataset(bars: dict, path: Path) -> dict:
     ax3.set_title(
         f"Triple barrier at +/-{seq.BARRIER:.2%} over {seq.HORIZON}s, "
         f"applied to all {side_w.size:,} windows",
-        fontsize=9.5, color=INK_2, pad=8, loc="left",
+        fontsize=9.5,
+        color=INK_2,
+        pad=8,
+        loc="left",
     )
 
     ax2.set_xlabel("day of the sample", fontsize=9)
@@ -497,7 +559,9 @@ def _target_label(data: dict) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--weights",
         default=None,

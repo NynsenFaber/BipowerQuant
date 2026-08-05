@@ -93,9 +93,7 @@ def month_blocks(ts: np.ndarray) -> list[tuple[str, int, int]]:
     return blocks
 
 
-def build_folds(
-    ts: np.ndarray, scheme: str = "anchored", train_months: int = 3
-) -> list[Fold]:
+def build_folds(ts: np.ndarray, scheme: str = "anchored", train_months: int = 3) -> list[Fold]:
     blocks = month_blocks(ts)
     if len(blocks) <= train_months:
         raise SystemExit(
@@ -109,8 +107,10 @@ def build_folds(
         folds.append(
             Fold(
                 name=f"{blocks[0][0]}..{blocks[cut - 1][0]} -> {blocks[cut][0]}..{blocks[-1][0]}",
-                train_lo=blocks[0][1], train_hi=blocks[cut - 1][2],
-                test_lo=blocks[cut][1], test_hi=blocks[-1][2],
+                train_lo=blocks[0][1],
+                train_hi=blocks[cut - 1][2],
+                test_lo=blocks[cut][1],
+                test_hi=blocks[-1][2],
             )
         )
         return folds
@@ -120,8 +120,10 @@ def build_folds(
         folds.append(
             Fold(
                 name=f"{blocks[first][0]}..{blocks[i - 1][0]} -> {blocks[i][0]}",
-                train_lo=blocks[first][1], train_hi=blocks[i - 1][2],
-                test_lo=blocks[i][1], test_hi=blocks[i][2],
+                train_lo=blocks[first][1],
+                train_hi=blocks[i - 1][2],
+                test_lo=blocks[i][1],
+                test_hi=blocks[i][2],
             )
         )
     return folds
@@ -227,9 +229,11 @@ def run_fold(
     }
     # A sweep over barriers and horizons re-fits everything per cell, so it asks
     # for XGBoost alone; the full walk-forward wants the whole comparison.
-    wanted = available if side_models is None else {
-        k: v for k, v in available.items() if k in side_models
-    }
+    wanted = (
+        available
+        if side_models is None
+        else {k: v for k, v in available.items() if k in side_models}
+    )
     p_side = {}
     for name, (model, cols) in wanted.items():
         model.fit(X_tr[fit_rows][:, cols], side_tr[fit_rows])
@@ -300,7 +304,9 @@ def backtest_fold(
                     keep_frac = float((gate_score >= threshold).mean())
 
                 entry_bars, direction = bt.signals_from_probabilities(
-                    starts, window, p_up,
+                    starts,
+                    window,
+                    p_up,
                     long_threshold=0.5 + side_margin,
                     short_threshold=0.5 - side_margin,
                     gate=gate_score,
@@ -309,22 +315,32 @@ def backtest_fold(
                 if entry_bars.size == 0:
                     continue
                 result = bt.simulate(
-                    bars, entry_bars, direction,
-                    barrier=barrier, horizon=horizon,
-                    costs=costs, execution=execution, bootstrap=0,
+                    bars,
+                    entry_bars,
+                    direction,
+                    barrier=barrier,
+                    horizon=horizon,
+                    costs=costs,
+                    execution=execution,
+                    bootstrap=0,
                     precomputed=precomputed,
                 )
-                rows.append({
-                    "fold": fold_result["fold"]["name"],
-                    "model": model_name,
-                    "gate": gate_name,
-                    "gate_quantile": q,
-                    "gate_keep_frac": keep_frac,
-                    **{k: v for k, v in result.summary.items()
-                       if k not in ("costs", "execution")},
-                    "daily_day": result.daily["day"],
-                    "daily_pnl_bps": result.daily["pnl_bps"],
-                })
+                rows.append(
+                    {
+                        "fold": fold_result["fold"]["name"],
+                        "model": model_name,
+                        "gate": gate_name,
+                        "gate_quantile": q,
+                        "gate_keep_frac": keep_frac,
+                        **{
+                            k: v
+                            for k, v in result.summary.items()
+                            if k not in ("costs", "execution")
+                        },
+                        "daily_day": result.daily["day"],
+                        "daily_pnl_bps": result.daily["pnl_bps"],
+                    }
+                )
     return rows
 
 
@@ -340,9 +356,22 @@ def pool_daily(rows: list[dict]) -> dict:
     pooled: dict[tuple, dict] = {}
     for row in rows:
         key = (row["model"], row["gate"], row["gate_quantile"])
-        entry = pooled.setdefault(key, {"day": [], "pnl": [], "trades": 0, "wins": 0.0,
-                                        "gross": 0.0, "net": 0.0, "hold": 0.0, "folds": 0,
-                                        "keep": [], "resolved": 0.0, "resolved_wins": 0.0})
+        entry = pooled.setdefault(
+            key,
+            {
+                "day": [],
+                "pnl": [],
+                "trades": 0,
+                "wins": 0.0,
+                "gross": 0.0,
+                "net": 0.0,
+                "hold": 0.0,
+                "folds": 0,
+                "keep": [],
+                "resolved": 0.0,
+                "resolved_wins": 0.0,
+            },
+        )
         entry["day"].append(row["daily_day"])
         entry["pnl"].append(row["daily_pnl_bps"])
         entry["trades"] += row["n_trades"]
@@ -385,14 +414,17 @@ def pool_daily(rows: list[dict]) -> dict:
                 ci = [float(np.percentile(sh, 2.5)), float(np.percentile(sh, 97.5))]
 
         out[key] = {
-            "model": key[0], "gate": key[1], "gate_quantile": key[2],
+            "model": key[0],
+            "gate": key[1],
+            "gate_quantile": key[2],
             "gate_keep_frac": float(np.mean(entry["keep"])),
             "n_trades": entry["trades"],
             "trades_per_day": entry["trades"] / max(pnl.size, 1),
             "hit_rate": entry["wins"] / n,
             "resolved_share": entry["resolved"] / n,
-            "resolved_hit_rate": (entry["resolved_wins"] / entry["resolved"]
-                                  if entry["resolved"] else float("nan")),
+            "resolved_hit_rate": (
+                entry["resolved_wins"] / entry["resolved"] if entry["resolved"] else float("nan")
+            ),
             "gross_bps": entry["gross"] / n,
             "cost_bps": entry["cost_bps"],
             "net_bps": entry["net"] / n,
@@ -417,28 +449,41 @@ def load_bars(paths: list[str]) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--bars", nargs="+", required=True, help="one or more .npz bar caches")
     parser.add_argument("--scheme", default="anchored", choices=SCHEMES)
     parser.add_argument("--train-months", type=int, default=3)
-    parser.add_argument("--train-stride", type=int, default=1,
-                        help="thin the training windows; test is always stride 1")
+    parser.add_argument(
+        "--train-stride",
+        type=int,
+        default=1,
+        help="thin the training windows; test is always stride 1",
+    )
     parser.add_argument("--barrier", type=float, default=seq.BARRIER)
     parser.add_argument("--horizon", type=int, default=seq.HORIZON)
     parser.add_argument("--window", type=int, default=seq.WINDOW_SIZE)
     parser.add_argument("--taker-fee-bps", type=float, default=2.5)
     parser.add_argument("--maker-fee-bps", type=float, default=0.0)
     parser.add_argument("--slippage-bps", type=float, default=0.5)
-    parser.add_argument("--half-spread-bps", type=float, default=None,
-                        help="default: estimate from the tape with the Roll estimator")
+    parser.add_argument(
+        "--half-spread-bps",
+        type=float,
+        default=None,
+        help="default: estimate from the tape with the Roll estimator",
+    )
     parser.add_argument("--entry", default="taker", choices=("taker", "maker"))
     parser.add_argument("--exit", default="taker", choices=("taker", "maker"))
     parser.add_argument("--queue-ahead-btc", type=float, default=1.0)
-    parser.add_argument("--side-margin", type=float, default=0.0,
-                        help="only trade when |p - 0.5| exceeds this")
-    parser.add_argument("--patchtst-probs", default=None,
-                        help=".npz of per-fold PatchTST probabilities, keyed by fold name")
+    parser.add_argument(
+        "--side-margin", type=float, default=0.0, help="only trade when |p - 0.5| exceeds this"
+    )
+    parser.add_argument(
+        "--patchtst-probs",
+        default=None,
+        help=".npz of per-fold PatchTST probabilities, keyed by fold name",
+    )
     parser.add_argument("--out", default=None, help="write the full result as JSON")
     args = parser.parse_args()
 
@@ -480,50 +525,79 @@ def main() -> None:
     if costs.half_spread_bps is None:
         costs.half_spread_bps = bt.roll_half_spread_bps(bars["price"])
         print(f"   Roll half-spread estimate: {costs.half_spread_bps:.4f} bp")
-    execution = bt.Execution(
-        entry=args.entry, exit=args.exit, queue_ahead_btc=args.queue_ahead_btc
-    )
+    execution = bt.Execution(entry=args.entry, exit=args.exit, queue_ahead_btc=args.queue_ahead_btc)
     breakeven = bt.breakeven_barrier_bps(costs, execution)
-    print(f"   round trip {breakeven:.2f} bp vs barrier {args.barrier / bt.BPS:.2f} bp"
-          f"  ->  {'PROFITABLE ceiling' if args.barrier / bt.BPS > breakeven else 'NEGATIVE by construction'}")
+    print(
+        f"   round trip {breakeven:.2f} bp vs barrier {args.barrier / bt.BPS:.2f} bp"
+        f"  ->  {'PROFITABLE ceiling' if args.barrier / bt.BPS > breakeven else 'NEGATIVE by construction'}"
+    )
 
     purge = args.window + args.horizon - 1
     all_rows, fold_results = [], []
     for fold in folds:
         print(f"\n4. Fold {fold.name}")
-        result = run_fold(bars, fold, X, starts, y_side, touched,
-                          args.window, args.horizon, args.barrier, purge, patchtst_probs,
-                          args.train_stride)
+        result = run_fold(
+            bars,
+            fold,
+            X,
+            starts,
+            y_side,
+            touched,
+            args.window,
+            args.horizon,
+            args.barrier,
+            purge,
+            patchtst_probs,
+            args.train_stride,
+        )
         print(f"   train {result['n_train']:,} | test {result['n_test']:,}")
-        print(f"   gate AUC  trained {result['gate']['trained_auc']:.4f} | "
-              f"RV {result['gate']['rv_auc']:.4f} | touch rate {result['gate']['touch_rate']:.2%}")
+        print(
+            f"   gate AUC  trained {result['gate']['trained_auc']:.4f} | "
+            f"RV {result['gate']['rv_auc']:.4f} | touch rate {result['gate']['touch_rate']:.2%}"
+        )
         for name, auc in result["side_auc"].items():
             print(f"   side AUC  {name:<26} {auc:.4f}")
-        all_rows += backtest_fold(bars, result, args.window, args.horizon, args.barrier,
-                                  costs, execution, precomputed,
-                                  side_margin=args.side_margin)
-        fold_results.append({
-            "fold": result["fold"],
-            "gate": result["gate"],
-            "side_auc": result["side_auc"],
-            "n_train": result["n_train"],
-            "n_test": result["n_test"],
-        })
+        all_rows += backtest_fold(
+            bars,
+            result,
+            args.window,
+            args.horizon,
+            args.barrier,
+            costs,
+            execution,
+            precomputed,
+            side_margin=args.side_margin,
+        )
+        fold_results.append(
+            {
+                "fold": result["fold"],
+                "gate": result["gate"],
+                "side_auc": result["side_auc"],
+                "n_train": result["n_train"],
+                "n_test": result["n_test"],
+            }
+        )
 
     print("\n5. Pooled out-of-sample backtest")
     pooled = pool_daily(all_rows)
-    rows = sorted(pooled.values(), key=lambda r: -(r["sharpe"] if np.isfinite(r["sharpe"]) else -99))
-    header = (f"{'model':<26} {'gate':<12} {'keep':>6} {'trades':>9} {'hit':>7} "
-              f"{'hit|res':>8} {'gross':>8} {'net':>8} {'Sharpe':>8} {'95% CI':>18}")
+    rows = sorted(
+        pooled.values(), key=lambda r: -(r["sharpe"] if np.isfinite(r["sharpe"]) else -99)
+    )
+    header = (
+        f"{'model':<26} {'gate':<12} {'keep':>6} {'trades':>9} {'hit':>7} "
+        f"{'hit|res':>8} {'gross':>8} {'net':>8} {'Sharpe':>8} {'95% CI':>18}"
+    )
     print(header)
     print("-" * len(header))
     for r in rows:
         ci = f"[{r['sharpe_ci'][0]:.2f}, {r['sharpe_ci'][1]:.2f}]" if r["sharpe_ci"] else "-"
         gate = r["gate"] if r["gate"] == "none" else f"{r['gate']}@{r['gate_quantile']:g}"
-        print(f"{r['model']:<26} {gate:<12} {r['gate_keep_frac']:>6.1%} {r['n_trades']:>9,} "
-              f"{r['hit_rate']:>7.2%} {r['resolved_hit_rate']:>8.2%} "
-              f"{r['gross_bps']:>8.3f} {r['net_bps']:>8.3f} "
-              f"{r['sharpe']:>8.2f} {ci:>18}")
+        print(
+            f"{r['model']:<26} {gate:<12} {r['gate_keep_frac']:>6.1%} {r['n_trades']:>9,} "
+            f"{r['hit_rate']:>7.2%} {r['resolved_hit_rate']:>8.2%} "
+            f"{r['gross_bps']:>8.3f} {r['net_bps']:>8.3f} "
+            f"{r['sharpe']:>8.2f} {ci:>18}"
+        )
     print("\nhit     = predicted barrier touched first, over all trades")
     print("hit|res = the same, over trades that reached a horizontal barrier at all")
     print("          (the second is what B(2h-1) > c is about)")
@@ -534,16 +608,24 @@ def main() -> None:
     partial = {r["model"] for r in rows if r["n_folds"] < len(folds)}
     for model in sorted(partial):
         covered = max(r["n_folds"] for r in rows if r["model"] == model)
-        print(f"\n!  {model} is pooled over {covered} of {len(folds)} folds — its row is not "
-              "comparable to the others.")
+        print(
+            f"\n!  {model} is pooled over {covered} of {len(folds)} folds — its row is not "
+            "comparable to the others."
+        )
 
     if args.out:
         payload = {
             "config": {
-                "bars": args.bars, "scheme": args.scheme, "train_months": args.train_months,
-                "barrier_bps": args.barrier / bt.BPS, "horizon": args.horizon,
-                "window": args.window, "costs": asdict(costs), "execution": asdict(execution),
-                "breakeven_barrier_bps": breakeven, "side_margin": args.side_margin,
+                "bars": args.bars,
+                "scheme": args.scheme,
+                "train_months": args.train_months,
+                "barrier_bps": args.barrier / bt.BPS,
+                "horizon": args.horizon,
+                "window": args.window,
+                "costs": asdict(costs),
+                "execution": asdict(execution),
+                "breakeven_barrier_bps": breakeven,
+                "side_margin": args.side_margin,
             },
             "folds": fold_results,
             "pooled": [{k: v for k, v in r.items()} for r in rows],

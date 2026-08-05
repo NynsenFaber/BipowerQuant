@@ -30,8 +30,7 @@ def test_taker_round_trip_sums_fee_spread_and_slippage():
 
 def test_maker_sides_pay_only_the_maker_fee():
     """A passive order does not cross the spread and is not slipped."""
-    costs = bt.Costs(taker_fee_bps=2.5, maker_fee_bps=0.0, half_spread_bps=0.1,
-                     slippage_bps=0.5)
+    costs = bt.Costs(taker_fee_bps=2.5, maker_fee_bps=0.0, half_spread_bps=0.1, slippage_bps=0.5)
 
     assert costs.round_trip_bps("maker", "maker") == pytest.approx(0.0)
     assert costs.round_trip_bps("maker", "taker") == pytest.approx(3.1)
@@ -271,8 +270,7 @@ def test_the_gate_suppresses_signals_regardless_of_side_confidence():
 
 
 def _costless():
-    return bt.Costs(taker_fee_bps=0.0, maker_fee_bps=0.0, half_spread_bps=0.0,
-                    slippage_bps=0.0)
+    return bt.Costs(taker_fee_bps=0.0, maker_fee_bps=0.0, half_spread_bps=0.0, slippage_bps=0.0)
 
 
 def test_positions_never_overlap(long_bars):
@@ -285,8 +283,9 @@ def test_positions_never_overlap(long_bars):
     entry_bars = np.arange(0, n - 200, dtype=np.int64)
     direction = np.ones(entry_bars.size, dtype=np.int64)
 
-    result = bt.simulate(long_bars, entry_bars, direction, barrier=0.0005, horizon=60,
-                         costs=_costless(), bootstrap=0)
+    result = bt.simulate(
+        long_bars, entry_bars, direction, barrier=0.0005, horizon=60, costs=_costless(), bootstrap=0
+    )
 
     entries = result.trades["entry_bar"]
     exits = result.trades["exit_bar"]
@@ -320,13 +319,26 @@ def test_an_oracle_earns_the_barrier_and_a_coin_flip_earns_nothing(long_bars):
     side, _, defined = bt.barrier_arrays(price, horizon, barrier)
 
     entry_bars = np.flatnonzero(defined & (side != 0))[:1_500].astype(np.int64)
-    oracle = bt.simulate(long_bars, entry_bars, side[entry_bars].astype(np.int64),
-                         barrier=barrier, horizon=horizon, costs=_costless(), bootstrap=0)
+    oracle = bt.simulate(
+        long_bars,
+        entry_bars,
+        side[entry_bars].astype(np.int64),
+        barrier=barrier,
+        horizon=horizon,
+        costs=_costless(),
+        bootstrap=0,
+    )
 
     rng = np.random.default_rng(0)
-    coin = bt.simulate(long_bars, entry_bars,
-                       rng.choice([-1, 1], entry_bars.size).astype(np.int64),
-                       barrier=barrier, horizon=horizon, costs=_costless(), bootstrap=0)
+    coin = bt.simulate(
+        long_bars,
+        entry_bars,
+        rng.choice([-1, 1], entry_bars.size).astype(np.int64),
+        barrier=barrier,
+        horizon=horizon,
+        costs=_costless(),
+        bootstrap=0,
+    )
 
     barrier_bps = barrier / bt.BPS
     assert oracle.summary["hit_rate"] == pytest.approx(1.0)
@@ -342,8 +354,11 @@ def test_an_oracle_still_loses_money_when_the_barrier_is_below_the_round_trip(lo
     entry_bars = np.flatnonzero(defined & (side != 0))[:1_500].astype(np.int64)
 
     result = bt.simulate(
-        long_bars, entry_bars, side[entry_bars].astype(np.int64),
-        barrier=barrier, horizon=horizon,
+        long_bars,
+        entry_bars,
+        side[entry_bars].astype(np.int64),
+        barrier=barrier,
+        horizon=horizon,
         costs=bt.Costs(taker_fee_bps=2.5, half_spread_bps=0.0, slippage_bps=0.5),
         bootstrap=0,
     )
@@ -356,29 +371,38 @@ def test_net_is_gross_less_the_round_trip(long_bars):
     entry_bars = np.arange(0, 1_000, dtype=np.int64)
     costs = bt.Costs(taker_fee_bps=2.5, half_spread_bps=0.0, slippage_bps=0.5)
 
-    result = bt.simulate(long_bars, entry_bars, np.ones(1_000, dtype=np.int64),
-                         costs=costs, bootstrap=0)
+    result = bt.simulate(
+        long_bars, entry_bars, np.ones(1_000, dtype=np.int64), costs=costs, bootstrap=0
+    )
 
-    np.testing.assert_allclose(result.trades["net_bps"],
-                               result.trades["gross_bps"] - 6.0, rtol=1e-10)
+    np.testing.assert_allclose(
+        result.trades["net_bps"], result.trades["gross_bps"] - 6.0, rtol=1e-10
+    )
 
 
 def test_shorting_flips_the_sign_of_the_gross_return(long_bars):
     entry_bars = np.array([100, 400, 700], dtype=np.int64)
 
-    longs = bt.simulate(long_bars, entry_bars, np.ones(3, dtype=np.int64),
-                        costs=_costless(), bootstrap=0)
-    shorts = bt.simulate(long_bars, entry_bars, -np.ones(3, dtype=np.int64),
-                         costs=_costless(), bootstrap=0)
+    longs = bt.simulate(
+        long_bars, entry_bars, np.ones(3, dtype=np.int64), costs=_costless(), bootstrap=0
+    )
+    shorts = bt.simulate(
+        long_bars, entry_bars, -np.ones(3, dtype=np.int64), costs=_costless(), bootstrap=0
+    )
 
-    np.testing.assert_allclose(longs.trades["gross_bps"], -shorts.trades["gross_bps"],
-                               rtol=1e-10)
+    np.testing.assert_allclose(longs.trades["gross_bps"], -shorts.trades["gross_bps"], rtol=1e-10)
 
 
 def test_holding_time_never_exceeds_the_horizon(long_bars):
     entry_bars = np.arange(0, 2_000, dtype=np.int64)
-    result = bt.simulate(long_bars, entry_bars, np.ones(2_000, dtype=np.int64),
-                         horizon=60, costs=_costless(), bootstrap=0)
+    result = bt.simulate(
+        long_bars,
+        entry_bars,
+        np.ones(2_000, dtype=np.int64),
+        horizon=60,
+        costs=_costless(),
+        bootstrap=0,
+    )
 
     assert result.trades["hold_s"].max() <= 60
     assert result.summary["mean_hold_s"] <= 60
@@ -392,8 +416,9 @@ def test_unresolved_trades_are_counted_separately_from_losses(long_bars):
     barrier before the two were split.
     """
     entry_bars = np.arange(0, 2_000, dtype=np.int64)
-    result = bt.simulate(long_bars, entry_bars, np.ones(2_000, dtype=np.int64),
-                         costs=_costless(), bootstrap=0)
+    result = bt.simulate(
+        long_bars, entry_bars, np.ones(2_000, dtype=np.int64), costs=_costless(), bootstrap=0
+    )
     s = result.summary
 
     assert 0.0 <= s["resolved_share"] <= 1.0
@@ -409,15 +434,17 @@ def test_entry_order_does_not_depend_on_the_callers_sorting(long_bars):
     shuffled = np.random.default_rng(0).permutation(entry_bars.size)
 
     ordered = bt.simulate(long_bars, entry_bars, direction, costs=_costless(), bootstrap=0)
-    scrambled = bt.simulate(long_bars, entry_bars[shuffled], direction[shuffled],
-                            costs=_costless(), bootstrap=0)
+    scrambled = bt.simulate(
+        long_bars, entry_bars[shuffled], direction[shuffled], costs=_costless(), bootstrap=0
+    )
 
     np.testing.assert_array_equal(ordered.trades["entry_bar"], scrambled.trades["entry_bar"])
 
 
 def test_no_signals_produces_an_empty_but_well_formed_result(long_bars):
-    result = bt.simulate(long_bars, np.array([], dtype=np.int64),
-                         np.array([], dtype=np.int64), bootstrap=0)
+    result = bt.simulate(
+        long_bars, np.array([], dtype=np.int64), np.array([], dtype=np.int64), bootstrap=0
+    )
 
     assert result.summary["n_trades"] == 0
     assert np.isnan(result.summary["gross_bps"])
@@ -431,8 +458,14 @@ def test_signals_in_the_undefined_tail_are_not_traded(long_bars):
     n = long_bars["price"].size
     entry_bars = np.arange(n - 30, n, dtype=np.int64)
 
-    result = bt.simulate(long_bars, entry_bars, np.ones(30, dtype=np.int64),
-                         horizon=60, costs=_costless(), bootstrap=0)
+    result = bt.simulate(
+        long_bars,
+        entry_bars,
+        np.ones(30, dtype=np.int64),
+        horizon=60,
+        costs=_costless(),
+        bootstrap=0,
+    )
 
     assert result.summary["n_trades"] == 0
 
@@ -457,8 +490,9 @@ def test_precomputed_barriers_give_the_same_answer(long_bars):
     precomputed = bt.barrier_arrays(long_bars["price"], 60, 0.0005)
 
     fresh = bt.simulate(long_bars, entry_bars, direction, costs=_costless(), bootstrap=0)
-    reused = bt.simulate(long_bars, entry_bars, direction, costs=_costless(), bootstrap=0,
-                         precomputed=precomputed)
+    reused = bt.simulate(
+        long_bars, entry_bars, direction, costs=_costless(), bootstrap=0, precomputed=precomputed
+    )
 
     np.testing.assert_array_equal(fresh.trades["entry_bar"], reused.trades["entry_bar"])
     np.testing.assert_allclose(fresh.trades["net_bps"], reused.trades["net_bps"])
@@ -467,19 +501,29 @@ def test_precomputed_barriers_give_the_same_answer(long_bars):
 def test_maker_entry_records_unfilled_signals(long_bars):
     """With an unclearable queue, every signal should go unfilled rather than trade."""
     entry_bars = np.arange(0, 500, dtype=np.int64)
-    execution = bt.Execution(entry="maker", exit="taker", queue_ahead_btc=1e9,
-                             max_wait_s=2)
+    execution = bt.Execution(entry="maker", exit="taker", queue_ahead_btc=1e9, max_wait_s=2)
 
-    result = bt.simulate(long_bars, entry_bars, np.ones(500, dtype=np.int64),
-                         costs=_costless(), execution=execution, bootstrap=0)
+    result = bt.simulate(
+        long_bars,
+        entry_bars,
+        np.ones(500, dtype=np.int64),
+        costs=_costless(),
+        execution=execution,
+        bootstrap=0,
+    )
 
     assert result.summary["n_unfilled"] > 0
 
 
 def test_summary_reports_the_assumptions_it_used(long_bars):
     costs = bt.Costs(taker_fee_bps=1.0, half_spread_bps=0.2, slippage_bps=0.3)
-    result = bt.simulate(long_bars, np.arange(0, 500, dtype=np.int64),
-                         np.ones(500, dtype=np.int64), costs=costs, bootstrap=0)
+    result = bt.simulate(
+        long_bars,
+        np.arange(0, 500, dtype=np.int64),
+        np.ones(500, dtype=np.int64),
+        costs=costs,
+        bootstrap=0,
+    )
 
     assert result.summary["costs"]["taker_fee_bps"] == 1.0
     assert result.summary["half_spread_bps"] == 0.2
@@ -488,9 +532,13 @@ def test_summary_reports_the_assumptions_it_used(long_bars):
 
 def test_a_missing_half_spread_is_estimated_from_the_tape(long_bars):
     """`Costs(half_spread_bps=None)` must resolve to a number, not propagate None."""
-    result = bt.simulate(long_bars, np.arange(0, 500, dtype=np.int64),
-                         np.ones(500, dtype=np.int64),
-                         costs=bt.Costs(half_spread_bps=None), bootstrap=0)
+    result = bt.simulate(
+        long_bars,
+        np.arange(0, 500, dtype=np.int64),
+        np.ones(500, dtype=np.int64),
+        costs=bt.Costs(half_spread_bps=None),
+        bootstrap=0,
+    )
 
     assert result.summary["half_spread_bps"] is not None
     assert result.summary["half_spread_bps"] > 0.0
@@ -502,9 +550,14 @@ def test_bootstrap_produces_an_interval_that_brackets_the_estimate(long_bars):
     # Stretch the timestamps so the trades land across ~20 distinct days.
     bars["ts"] = long_bars["ts"][0] + np.arange(long_bars["ts"].size) * 400
 
-    result = bt.simulate(bars, np.arange(0, 2_000, dtype=np.int64),
-                         np.ones(2_000, dtype=np.int64), costs=_costless(),
-                         bootstrap=200, seed=3)
+    result = bt.simulate(
+        bars,
+        np.arange(0, 2_000, dtype=np.int64),
+        np.ones(2_000, dtype=np.int64),
+        costs=_costless(),
+        bootstrap=200,
+        seed=3,
+    )
 
     if result.summary["sharpe_ci"] is not None:
         lo, hi = result.summary["sharpe_ci"]

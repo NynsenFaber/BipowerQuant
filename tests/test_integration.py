@@ -55,8 +55,16 @@ def two_folds() -> list[wf.Fold]:
 
 
 def tiny_model_config() -> PatchTSTConfig:
-    return PatchTSTConfig(n_channels=2, seq_len=WINDOW, patch_len=8, stride=4,
-                          d_model=16, n_heads=2, n_layers=2, d_ff=32)
+    return PatchTSTConfig(
+        n_channels=2,
+        seq_len=WINDOW,
+        patch_len=8,
+        stride=4,
+        d_model=16,
+        n_heads=2,
+        n_layers=2,
+        d_ff=32,
+    )
 
 
 def tiny_train_config() -> TrainConfig:
@@ -74,9 +82,16 @@ def test_train_folds_scores_every_test_window(fold_bars):
     """
     folds = two_folds()
     probabilities, meta = pf.train_folds(
-        fold_bars, folds, window=WINDOW, horizon=HORIZON,
-        config=tiny_model_config(), train_config=tiny_train_config(),
-        train_stride=4, val_stride=4, device=torch.device("cpu"), verbose=False,
+        fold_bars,
+        folds,
+        window=WINDOW,
+        horizon=HORIZON,
+        config=tiny_model_config(),
+        train_config=tiny_train_config(),
+        train_stride=4,
+        val_stride=4,
+        device=torch.device("cpu"),
+        verbose=False,
     )
 
     starts = seq.valid_window_starts(fold_bars["price"].size, WINDOW, HORIZON)
@@ -90,16 +105,28 @@ def test_train_folds_scores_every_test_window(fold_bars):
 def test_train_folds_reports_metadata_the_callers_read(fold_bars):
     """`train_patchtst_local.py` prints these keys and writes them to JSON."""
     _, meta = pf.train_folds(
-        fold_bars, two_folds(), window=WINDOW, horizon=HORIZON,
-        config=tiny_model_config(), train_config=tiny_train_config(),
-        train_stride=4, val_stride=4, device=torch.device("cpu"), verbose=False,
+        fold_bars,
+        two_folds(),
+        window=WINDOW,
+        horizon=HORIZON,
+        config=tiny_model_config(),
+        train_config=tiny_train_config(),
+        train_stride=4,
+        val_stride=4,
+        device=torch.device("cpu"),
+        verbose=False,
     )
 
-    assert set(meta) >= {"folds", "train_stride", "elapsed_hours", "config",
-                         "train_config", "device"}
+    assert set(meta) >= {
+        "folds",
+        "train_stride",
+        "elapsed_hours",
+        "config",
+        "train_config",
+        "device",
+    }
     for row in meta["folds"].values():
-        assert set(row) >= {"roc_auc", "n_test", "n_resolved", "best_epoch",
-                            "epochs_run"}
+        assert set(row) >= {"roc_auc", "n_test", "n_resolved", "best_epoch", "epochs_run"}
         assert row["n_resolved"] <= row["n_test"]
 
 
@@ -114,9 +141,16 @@ def test_on_fold_complete_fires_once_per_fold_with_that_folds_probabilities(fold
     folds = two_folds()
 
     probabilities, _ = pf.train_folds(
-        fold_bars, folds, window=WINDOW, horizon=HORIZON,
-        config=tiny_model_config(), train_config=tiny_train_config(),
-        train_stride=4, val_stride=4, device=torch.device("cpu"), verbose=False,
+        fold_bars,
+        folds,
+        window=WINDOW,
+        horizon=HORIZON,
+        config=tiny_model_config(),
+        train_config=tiny_train_config(),
+        train_stride=4,
+        val_stride=4,
+        device=torch.device("cpu"),
+        verbose=False,
         on_fold_complete=lambda name, probs: seen.append((name, probs.copy())),
     )
 
@@ -128,9 +162,16 @@ def test_on_fold_complete_fires_once_per_fold_with_that_folds_probabilities(fold
 def test_train_folds_writes_one_checkpoint_per_fold(fold_bars, tmp_path):
     folds = two_folds()
     pf.train_folds(
-        fold_bars, folds, window=WINDOW, horizon=HORIZON,
-        config=tiny_model_config(), train_config=tiny_train_config(),
-        train_stride=4, val_stride=4, device=torch.device("cpu"), verbose=False,
+        fold_bars,
+        folds,
+        window=WINDOW,
+        horizon=HORIZON,
+        config=tiny_model_config(),
+        train_config=tiny_train_config(),
+        train_stride=4,
+        val_stride=4,
+        device=torch.device("cpu"),
+        verbose=False,
         checkpoint_dir=tmp_path,
     )
 
@@ -142,9 +183,16 @@ def test_checkpoints_record_the_fold_they_were_trained_on(fold_bars, tmp_path):
     from patchtst_model import load_checkpoint
 
     pf.train_folds(
-        fold_bars, two_folds()[:1], window=WINDOW, horizon=HORIZON,
-        config=tiny_model_config(), train_config=tiny_train_config(),
-        train_stride=4, val_stride=4, device=torch.device("cpu"), verbose=False,
+        fold_bars,
+        two_folds()[:1],
+        window=WINDOW,
+        horizon=HORIZON,
+        config=tiny_model_config(),
+        train_config=tiny_train_config(),
+        train_stride=4,
+        val_stride=4,
+        device=torch.device("cpu"),
+        verbose=False,
         checkpoint_dir=tmp_path,
     )
 
@@ -160,10 +208,17 @@ def test_checkpoints_record_the_fold_they_were_trained_on(fold_bars, tmp_path):
 def test_a_time_budget_picks_a_stride_from_a_measured_probe(fold_bars):
     """The overnight guarantee: throughput is measured, not assumed."""
     _, meta = pf.train_folds(
-        fold_bars, two_folds()[:1], window=WINDOW, horizon=HORIZON,
-        config=tiny_model_config(), train_config=tiny_train_config(),
-        train_stride=None, time_budget_hours=1.0, val_stride=4,
-        device=torch.device("cpu"), verbose=False,
+        fold_bars,
+        two_folds()[:1],
+        window=WINDOW,
+        horizon=HORIZON,
+        config=tiny_model_config(),
+        train_config=tiny_train_config(),
+        train_stride=None,
+        time_budget_hours=1.0,
+        val_stride=4,
+        device=torch.device("cpu"),
+        verbose=False,
     )
 
     assert meta["train_stride"] >= 2
@@ -188,9 +243,20 @@ def _fold_inputs(bars):
 def test_run_fold_fits_a_gate_and_every_side_model(fold_bars):
     X, starts, y_side, touched, _ = _fold_inputs(fold_bars)
 
-    result = wf.run_fold(fold_bars, two_folds()[0], X, starts, y_side, touched,
-                         WINDOW, HORIZON, seq.BARRIER, purge=WINDOW + HORIZON - 1,
-                         patchtst_probs=None, train_stride=8)
+    result = wf.run_fold(
+        fold_bars,
+        two_folds()[0],
+        X,
+        starts,
+        y_side,
+        touched,
+        WINDOW,
+        HORIZON,
+        seq.BARRIER,
+        purge=WINDOW + HORIZON - 1,
+        patchtst_probs=None,
+        train_stride=8,
+    )
 
     assert result["n_train"] > 0 and result["n_test"] > 0
     assert set(result["gate"]) >= {"trained_auc", "rv_auc", "touch_rate"}
@@ -207,9 +273,20 @@ def test_supplied_patchtst_probabilities_join_the_model_grid(fold_bars):
     n_test = int(((starts >= fold.test_lo) & (starts < fold.test_hi)).sum())
     supplied = {fold.name: np.full(n_test, 0.6, dtype=np.float32)}
 
-    result = wf.run_fold(fold_bars, fold, X, starts, y_side, touched,
-                         WINDOW, HORIZON, seq.BARRIER, purge=WINDOW + HORIZON - 1,
-                         patchtst_probs=supplied, train_stride=8)
+    result = wf.run_fold(
+        fold_bars,
+        fold,
+        X,
+        starts,
+        y_side,
+        touched,
+        WINDOW,
+        HORIZON,
+        seq.BARRIER,
+        purge=WINDOW + HORIZON - 1,
+        patchtst_probs=supplied,
+        train_stride=8,
+    )
 
     patchtst = [k for k in result["probabilities"] if "patchtst" in k.lower()]
     assert patchtst, f"PatchTST missing from {list(result['probabilities'])}"
@@ -227,10 +304,20 @@ def test_misaligned_probabilities_are_skipped_loudly_not_scored(fold_bars, capsy
     X, starts, y_side, touched, _ = _fold_inputs(fold_bars)
     fold = two_folds()[0]
 
-    result = wf.run_fold(fold_bars, fold, X, starts, y_side, touched,
-                         WINDOW, HORIZON, seq.BARRIER, purge=WINDOW + HORIZON - 1,
-                         patchtst_probs={fold.name: np.full(7, 0.5, dtype=np.float32)},
-                         train_stride=8)
+    result = wf.run_fold(
+        fold_bars,
+        fold,
+        X,
+        starts,
+        y_side,
+        touched,
+        WINDOW,
+        HORIZON,
+        seq.BARRIER,
+        purge=WINDOW + HORIZON - 1,
+        patchtst_probs={fold.name: np.full(7, 0.5, dtype=np.float32)},
+        train_stride=8,
+    )
 
     assert not [k for k in result["probabilities"] if "patchtst" in k.lower()]
     assert "skipping" in capsys.readouterr().out
@@ -238,13 +325,31 @@ def test_misaligned_probabilities_are_skipped_loudly_not_scored(fold_bars, capsy
 
 def test_backtest_fold_prices_every_model_gate_and_threshold(fold_bars):
     X, starts, y_side, touched, precomputed = _fold_inputs(fold_bars)
-    result = wf.run_fold(fold_bars, two_folds()[0], X, starts, y_side, touched,
-                         WINDOW, HORIZON, seq.BARRIER, purge=WINDOW + HORIZON - 1,
-                         patchtst_probs=None, train_stride=8)
+    result = wf.run_fold(
+        fold_bars,
+        two_folds()[0],
+        X,
+        starts,
+        y_side,
+        touched,
+        WINDOW,
+        HORIZON,
+        seq.BARRIER,
+        purge=WINDOW + HORIZON - 1,
+        patchtst_probs=None,
+        train_stride=8,
+    )
 
-    rows = wf.backtest_fold(fold_bars, result, WINDOW, HORIZON, seq.BARRIER,
-                            bt.Costs(half_spread_bps=0.0), bt.Execution(),
-                            precomputed)
+    rows = wf.backtest_fold(
+        fold_bars,
+        result,
+        WINDOW,
+        HORIZON,
+        seq.BARRIER,
+        bt.Costs(half_spread_bps=0.0),
+        bt.Execution(),
+        precomputed,
+    )
 
     assert rows
     for row in rows:
@@ -258,13 +363,30 @@ def test_the_full_grid_pools_into_comparable_rows(fold_bars):
     X, starts, y_side, touched, precomputed = _fold_inputs(fold_bars)
     rows = []
     for fold in two_folds():
-        result = wf.run_fold(fold_bars, fold, X, starts, y_side, touched,
-                             WINDOW, HORIZON, seq.BARRIER,
-                             purge=WINDOW + HORIZON - 1, patchtst_probs=None,
-                             train_stride=8)
-        rows += wf.backtest_fold(fold_bars, result, WINDOW, HORIZON, seq.BARRIER,
-                                 bt.Costs(half_spread_bps=0.0), bt.Execution(),
-                                 precomputed)
+        result = wf.run_fold(
+            fold_bars,
+            fold,
+            X,
+            starts,
+            y_side,
+            touched,
+            WINDOW,
+            HORIZON,
+            seq.BARRIER,
+            purge=WINDOW + HORIZON - 1,
+            patchtst_probs=None,
+            train_stride=8,
+        )
+        rows += wf.backtest_fold(
+            fold_bars,
+            result,
+            WINDOW,
+            HORIZON,
+            seq.BARRIER,
+            bt.Costs(half_spread_bps=0.0),
+            bt.Execution(),
+            precomputed,
+        )
 
     pooled = wf.pool_daily(rows)
 
@@ -276,8 +398,9 @@ def test_the_full_grid_pools_into_comparable_rows(fold_bars):
 
 
 def test_build_sequence_dataset_produces_purged_ordered_splits(fold_bars):
-    dataset = seq.build_sequence_dataset(fold_bars, window=WINDOW, horizon=HORIZON,
-                                         train_frac=0.7, val_frac=0.1)
+    dataset = seq.build_sequence_dataset(
+        fold_bars, window=WINDOW, horizon=HORIZON, train_frac=0.7, val_frac=0.1
+    )
 
     train, val, test = (dataset.splits[k] for k in ("train", "val", "test"))
     assert train.max() < val.min() < test.min()
@@ -295,8 +418,9 @@ def test_dataset_labels_and_positive_rate_line_up(fold_bars):
 
 
 def test_dataset_channels_follow_the_requested_layout(fold_bars):
-    dataset = seq.build_sequence_dataset(fold_bars, window=WINDOW, horizon=HORIZON,
-                                         channel_set="full")
+    dataset = seq.build_sequence_dataset(
+        fold_bars, window=WINDOW, horizon=HORIZON, channel_set="full"
+    )
 
     assert dataset.channels.shape[1] == len(seq.CHANNEL_SETS["full"])
 
@@ -319,8 +443,9 @@ def test_block_bootstrap_brackets_a_genuine_edge_above_a_coin_flip():
 
 def test_block_bootstrap_needs_more_windows_than_one_block():
     with pytest.raises(ValueError, match="block-bootstrap"):
-        seq.block_bootstrap_auc(np.array([0, 1, 0, 1]), np.array([0.1, 0.9, 0.2, 0.8]),
-                                n_boot=10, block=360)
+        seq.block_bootstrap_auc(
+            np.array([0, 1, 0, 1]), np.array([0.1, 0.9, 0.2, 0.8]), n_boot=10, block=360
+        )
 
 
 def test_block_bootstrap_reports_no_edge_for_a_random_score():

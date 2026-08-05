@@ -66,18 +66,38 @@ def evaluate_cell(
     rows, fold_stats = [], []
     for fold in folds:
         result = wf.run_fold(
-            bars, fold, X, starts, y_side, touched, window, horizon, barrier,
-            purge, None, train_stride, side_models=("XGBoost",),
+            bars,
+            fold,
+            X,
+            starts,
+            y_side,
+            touched,
+            window,
+            horizon,
+            barrier,
+            purge,
+            None,
+            train_stride,
+            side_models=("XGBoost",),
         )
         rows += wf.backtest_fold(
-            bars, result, window, horizon, barrier, costs, execution,
-            precomputed, gate_quantiles=gate_quantiles,
+            bars,
+            result,
+            window,
+            horizon,
+            barrier,
+            costs,
+            execution,
+            precomputed,
+            gate_quantiles=gate_quantiles,
         )
-        fold_stats.append({
-            "fold": result["fold"]["name"],
-            "gate": result["gate"],
-            "side_auc": result["side_auc"],
-        })
+        fold_stats.append(
+            {
+                "fold": result["fold"]["name"],
+                "gate": result["gate"],
+                "side_auc": result["side_auc"],
+            }
+        )
 
     pooled = wf.pool_daily(rows)
     return {
@@ -95,10 +115,20 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--bars", nargs="+", required=True)
-    parser.add_argument("--barriers", nargs="+", type=float, default=[5, 10, 20, 40],
-                        help="barrier half-widths in basis points")
-    parser.add_argument("--horizons", nargs="+", type=int, default=[60, 300, 900],
-                        help="vertical barriers in seconds")
+    parser.add_argument(
+        "--barriers",
+        nargs="+",
+        type=float,
+        default=[5, 10, 20, 40],
+        help="barrier half-widths in basis points",
+    )
+    parser.add_argument(
+        "--horizons",
+        nargs="+",
+        type=int,
+        default=[60, 300, 900],
+        help="vertical barriers in seconds",
+    )
     parser.add_argument("--window", type=int, default=seq.WINDOW_SIZE)
     parser.add_argument("--scheme", default="anchored", choices=wf.SCHEMES)
     parser.add_argument("--train-months", type=int, default=3)
@@ -138,50 +168,79 @@ def main() -> None:
         for barrier_bps in args.barriers:
             print(f"\n--- barrier {barrier_bps:g} bp | horizon {horizon}s ---", flush=True)
             cell = evaluate_cell(
-                bars, folds, args.window, horizon, barrier_bps * bt.BPS,
-                costs, execution, args.train_stride, tuple(args.gate_quantiles),
+                bars,
+                folds,
+                args.window,
+                horizon,
+                barrier_bps * bt.BPS,
+                costs,
+                execution,
+                args.train_stride,
+                tuple(args.gate_quantiles),
             )
             best = max(
                 (r for r in cell["pooled"] if np.isfinite(r["sharpe"])),
-                key=lambda r: r["sharpe"], default=None,
+                key=lambda r: r["sharpe"],
+                default=None,
             )
             side_aucs = [f["side_auc"].get("XGBoost", float("nan")) for f in cell["folds"]]
-            print(f"    touch rate {cell['touch_rate']:.2%} | "
-                  f"XGB side AUC {np.nanmean(side_aucs):.4f}")
+            print(
+                f"    touch rate {cell['touch_rate']:.2%} | "
+                f"XGB side AUC {np.nanmean(side_aucs):.4f}"
+            )
             if best:
-                print(f"    best: {best['model']} gate={best['gate']}@{best['gate_quantile']:g} "
-                      f"| {best['n_trades']:,} trades | hit {best['hit_rate']:.2%} "
-                      f"| gross {best['gross_bps']:.2f} bp | net {best['net_bps']:.2f} bp "
-                      f"| Sharpe {best['sharpe']:.2f}")
+                print(
+                    f"    best: {best['model']} gate={best['gate']}@{best['gate_quantile']:g} "
+                    f"| {best['n_trades']:,} trades | hit {best['hit_rate']:.2%} "
+                    f"| gross {best['gross_bps']:.2f} bp | net {best['net_bps']:.2f} bp "
+                    f"| Sharpe {best['sharpe']:.2f}"
+                )
             cells.append(cell)
 
     print("\n" + "=" * 100)
     print("SWEEP SUMMARY  (best configuration per cell, XGBoost side model)")
     print("=" * 100)
-    header = (f"{'barrier':>8} {'horizon':>8} {'touch':>7} {'AUC':>7} {'trades':>9} "
-              f"{'hit':>7} {'gross':>8} {'net':>8} {'Sharpe':>8}")
+    header = (
+        f"{'barrier':>8} {'horizon':>8} {'touch':>7} {'AUC':>7} {'trades':>9} "
+        f"{'hit':>7} {'gross':>8} {'net':>8} {'Sharpe':>8}"
+    )
     print(header)
     print("-" * len(header))
     for cell in cells:
-        xgb_rows = [r for r in cell["pooled"]
-                    if r["model"] == "XGBoost" and np.isfinite(r["sharpe"])]
+        xgb_rows = [
+            r for r in cell["pooled"] if r["model"] == "XGBoost" and np.isfinite(r["sharpe"])
+        ]
         best = max(xgb_rows, key=lambda r: r["sharpe"], default=None)
         auc = np.nanmean([f["side_auc"].get("XGBoost", float("nan")) for f in cell["folds"]])
         if best is None:
-            print(f"{cell['barrier_bps']:>7.0f}b {cell['horizon_s']:>7}s "
-                  f"{cell['touch_rate']:>7.1%} {auc:>7.4f} {'-':>9}")
+            print(
+                f"{cell['barrier_bps']:>7.0f}b {cell['horizon_s']:>7}s "
+                f"{cell['touch_rate']:>7.1%} {auc:>7.4f} {'-':>9}"
+            )
             continue
-        print(f"{cell['barrier_bps']:>7.0f}b {cell['horizon_s']:>7}s {cell['touch_rate']:>7.1%} "
-              f"{auc:>7.4f} {best['n_trades']:>9,} {best['hit_rate']:>7.2%} "
-              f"{best['gross_bps']:>8.2f} {best['net_bps']:>8.2f} {best['sharpe']:>8.2f}")
+        print(
+            f"{cell['barrier_bps']:>7.0f}b {cell['horizon_s']:>7}s {cell['touch_rate']:>7.1%} "
+            f"{auc:>7.4f} {best['n_trades']:>9,} {best['hit_rate']:>7.2%} "
+            f"{best['gross_bps']:>8.2f} {best['net_bps']:>8.2f} {best['sharpe']:>8.2f}"
+        )
 
     if args.out:
-        Path(args.out).write_text(json.dumps({
-            "costs": asdict(costs), "execution": asdict(execution),
-            "breakeven_bps": breakeven, "spread": spread,
-            "scheme": args.scheme, "train_months": args.train_months,
-            "train_stride": args.train_stride, "cells": cells,
-        }, indent=2, default=float))
+        Path(args.out).write_text(
+            json.dumps(
+                {
+                    "costs": asdict(costs),
+                    "execution": asdict(execution),
+                    "breakeven_bps": breakeven,
+                    "spread": spread,
+                    "scheme": args.scheme,
+                    "train_months": args.train_months,
+                    "train_stride": args.train_stride,
+                    "cells": cells,
+                },
+                indent=2,
+                default=float,
+            )
+        )
         print(f"\nWrote {args.out}")
 
 

@@ -157,13 +157,20 @@ def estimate_half_spread_bps(price: np.ndarray, block: int = SECONDS_PER_DAY) ->
 
     tick_floor = 0.5 * TICK_SIZE_USDT / float(np.median(price)) / BPS
     if not estimates:
-        return {"half_spread_bps": tick_floor, "method": "tick floor (Roll unresolvable)",
-                "roll_blocks": 0, "tick_floor_bps": tick_floor}
+        return {
+            "half_spread_bps": tick_floor,
+            "method": "tick floor (Roll unresolvable)",
+            "roll_blocks": 0,
+            "tick_floor_bps": tick_floor,
+        }
 
     roll = float(np.median(estimates)) / 2.0 / BPS
-    return {"half_spread_bps": max(roll, tick_floor),
-            "method": "Roll" if roll >= tick_floor else "tick floor (Roll below it)",
-            "roll_blocks": len(estimates), "tick_floor_bps": tick_floor}
+    return {
+        "half_spread_bps": max(roll, tick_floor),
+        "method": "Roll" if roll >= tick_floor else "tick floor (Roll below it)",
+        "roll_blocks": len(estimates),
+        "tick_floor_bps": tick_floor,
+    }
 
 
 def roll_half_spread_bps(price: np.ndarray, block: int = SECONDS_PER_DAY) -> float:
@@ -290,7 +297,8 @@ def simulate(
         costs = Costs(**{**asdict(costs), "half_spread_bps": roll_half_spread_bps(price)})
 
     side, exit_offset, defined = (
-        precomputed if precomputed is not None
+        precomputed
+        if precomputed is not None
         else barrier_arrays(price, horizon=horizon, barrier=barrier)
     )
 
@@ -409,12 +417,21 @@ def _summarise(
         "execution": asdict(execution),
     }
     if net.size == 0:
-        return {**base, "hit_rate": float("nan"), "resolved_hit_rate": float("nan"),
-                "resolved_share": float("nan"), "gross_bps": float("nan"),
-                "cost_bps": round_trip_bps, "net_bps": float("nan"),
-                "mean_hold_s": float("nan"), "total_return": 0.0,
-                "max_drawdown": 0.0, "sharpe": float("nan"), "n_days": 0,
-                "sharpe_ci": None}, {"day": np.empty(0), "pnl_bps": np.empty(0)}
+        return {
+            **base,
+            "hit_rate": float("nan"),
+            "resolved_hit_rate": float("nan"),
+            "resolved_share": float("nan"),
+            "gross_bps": float("nan"),
+            "cost_bps": round_trip_bps,
+            "net_bps": float("nan"),
+            "mean_hold_s": float("nan"),
+            "total_return": 0.0,
+            "max_drawdown": 0.0,
+            "sharpe": float("nan"),
+            "n_days": 0,
+            "sharpe_ci": None,
+        }, {"day": np.empty(0), "pnl_bps": np.empty(0)}
 
     # Daily P&L: the honest aggregation level. Per-trade Sharpe would depend on
     # how often the strategy happens to fire, which is not a property of the edge.
@@ -446,7 +463,9 @@ def _summarise(
         **base,
         "hit_rate": float(trades["won"].mean()),
         "resolved_share": float(resolved.mean()),
-        "resolved_hit_rate": float(trades["won"][resolved].mean()) if resolved.any() else float("nan"),
+        "resolved_hit_rate": float(trades["won"][resolved].mean())
+        if resolved.any()
+        else float("nan"),
         "gross_bps": float(trades["gross_bps"].mean()),
         "cost_bps": round_trip_bps,
         "net_bps": float(net.mean()),

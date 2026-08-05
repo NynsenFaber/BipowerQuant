@@ -74,6 +74,7 @@ def _assert_openmp_safe() -> None:
             "Linux (including Colab) is unaffected."
         )
 
+
 MILLISECOND = 1e3
 MICROSECOND = 1e6
 
@@ -268,7 +269,10 @@ def run_benchmark(
     # Fold the scaler into the linear term, so the hand-written NumPy path times
     # one dot product rather than sklearn's transform stack: standardising then
     # applying (w, b) is the same affine map as applying (w/sigma, b - w.mu/sigma).
-    scaler, linear = logistic.named_steps["standardscaler"], logistic.named_steps["logisticregression"]
+    scaler, linear = (
+        logistic.named_steps["standardscaler"],
+        logistic.named_steps["logisticregression"],
+    )
     coefficients = (linear.coef_.ravel() / scaler.scale_).astype(np.float64)
     intercept = float(linear.intercept_[0] - coefficients @ scaler.mean_)
 
@@ -317,9 +321,7 @@ def run_benchmark(
         model.to(target).eval()
         key = target.type
         if key not in batchers:
-            batchers[key] = WindowBatcher(
-                dataset.channels, test_starts, y_test, window, target
-            )
+            batchers[key] = WindowBatcher(dataset.channels, test_starts, y_test, window, target)
         x, _ = batchers[key].gather(torch.arange(count, device=target))
         sync = _sync_for(target)
 
@@ -417,7 +419,9 @@ def format_benchmark(results: dict) -> str:
     lines.append(
         f"  vectorised, amortised : {prep['amortised_ms']:.4f}ms per window across the split"
     )
-    lines.append("  PatchTST pays neither: it reads the raw window and normalises in the forward pass.")
+    lines.append(
+        "  PatchTST pays neither: it reads the raw window and normalises in the forward pass."
+    )
     return "\n".join(lines)
 
 
@@ -429,7 +433,9 @@ if __name__ == "__main__":
     from patchtst_model import load_checkpoint
 
     parser = argparse.ArgumentParser(description="Time all three models on the same windows.")
-    parser.add_argument("--weights", default=str(Path(__file__).resolve().parent.parent / "weights" / "patchtst.pt"))
+    parser.add_argument(
+        "--weights", default=str(Path(__file__).resolve().parent.parent / "weights" / "patchtst.pt")
+    )
     parser.add_argument("--csv", default=FILE_PATH)
     parser.add_argument("--bars-cache", default=None)
     parser.add_argument("--hours", type=float, default=None)
@@ -449,9 +455,7 @@ if __name__ == "__main__":
     dataset = seq.build_sequence_dataset(bars, **seq.dataset_kwargs_from(data_meta))
     print(dataset.summary())
     print("\nFitting the tabular baselines on the same windows ...\n")
-    results = run_benchmark(
-        dataset, model, bars, device=args.device, batch_size=args.batch_size
-    )
+    results = run_benchmark(dataset, model, bars, device=args.device, batch_size=args.batch_size)
     print(format_benchmark(results))
     print(f"\nTest ROC-AUC on {results['test_windows']:,} identical windows:")
     for name, auc in results["accuracy"].items():

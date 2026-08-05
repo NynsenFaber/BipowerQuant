@@ -53,21 +53,26 @@ def clean_modules() -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--clean", action="store_true",
-                        help="delete the build tree before configuring")
-    parser.add_argument("--debug", action="store_true",
-                        help="build unoptimised, with assertions enabled")
-    parser.add_argument("--jobs", type=int, default=0,
-                        help="parallel build jobs; 0 lets CMake decide")
-    parser.add_argument("--no-verify", action="store_true",
-                        help="skip the post-build import check")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--clean", action="store_true", help="delete the build tree before configuring"
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="build unoptimised, with assertions enabled"
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=0, help="parallel build jobs; 0 lets CMake decide"
+    )
+    parser.add_argument("--no-verify", action="store_true", help="skip the post-build import check")
     args = parser.parse_args()
 
     if shutil.which("cmake") is None:
-        print("error: cmake is not on PATH. Install CMake 3.18+ and a C++20 compiler.",
-              file=sys.stderr)
+        print(
+            "error: cmake is not on PATH. Install CMake 3.18+ and a C++20 compiler.",
+            file=sys.stderr,
+        )
         return 1
 
     if args.clean and BUILD_DIR.exists():
@@ -76,14 +81,18 @@ def main() -> int:
     clean_modules()
 
     config = "Debug" if args.debug else "Release"
-    run([
-        "cmake",
-        "-S", str(REPO_ROOT),
-        "-B", str(BUILD_DIR),
-        f"-DCMAKE_BUILD_TYPE={config}",
-        # The interpreter that will import the module is the one to build against.
-        f"-DPython_EXECUTABLE={sys.executable}",
-    ])
+    run(
+        [
+            "cmake",
+            "-S",
+            str(REPO_ROOT),
+            "-B",
+            str(BUILD_DIR),
+            f"-DCMAKE_BUILD_TYPE={config}",
+            # The interpreter that will import the module is the one to build against.
+            f"-DPython_EXECUTABLE={sys.executable}",
+        ]
+    )
 
     build = ["cmake", "--build", str(BUILD_DIR), "--config", config]
     if args.jobs:
@@ -100,8 +109,9 @@ def main() -> int:
         path for pattern in MODULE_SUFFIXES for path in MODULE_DIR.glob(f"bipower_core{pattern}")
     )
     if not built:
-        print(f"error: build reported success but no module landed in {MODULE_DIR}",
-              file=sys.stderr)
+        print(
+            f"error: build reported success but no module landed in {MODULE_DIR}", file=sys.stderr
+        )
         return 1
     print(f"built {', '.join(p.name for p in built)}")
 
@@ -110,9 +120,13 @@ def main() -> int:
         # this project resolves the module — an import that only works from the
         # repository root is not the one that matters.
         subprocess.run(
-            [sys.executable, "-c",
-             "import bipower_core; print('bipower_core imports:', bipower_core.__doc__)"],
-            check=True, cwd=MODULE_DIR,
+            [
+                sys.executable,
+                "-c",
+                "import bipower_core; print('bipower_core imports:', bipower_core.__doc__)",
+            ],
+            check=True,
+            cwd=MODULE_DIR,
         )
     return 0
 

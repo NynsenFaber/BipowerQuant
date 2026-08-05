@@ -89,8 +89,10 @@ def main() -> None:
 
     print("\n✅ Logistic Regression evaluated")
     print("=========================================")
-    print(f"ROC-AUC:   {roc_auc:.4f}   95% CI [{ci['lo']:.4f}, {ci['hi']:.4f}], "
-          f"P(<=0.5) = {ci['p_le_half']:.3f}")
+    print(
+        f"ROC-AUC:   {roc_auc:.4f}   95% CI [{ci['lo']:.4f}, {ci['hi']:.4f}], "
+        f"P(<=0.5) = {ci['p_le_half']:.3f}"
+    )
     print(f"Precision: {precision:.4f}   (base rate: {y_test.mean():.4f})")
     print(f"Recall:    {recall:.4f}")
     print(f"F1-Score:  {f1:.4f}")

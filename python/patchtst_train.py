@@ -73,7 +73,7 @@ def _amp_setup(device: torch.device, enabled: bool):
         return torch.bfloat16, None
     try:
         scaler = torch.amp.GradScaler("cuda")
-    except (AttributeError, TypeError):  # older torch
+    except AttributeError, TypeError:  # older torch
         scaler = torch.cuda.amp.GradScaler()
     return torch.float16, scaler
 
@@ -351,7 +351,9 @@ def fit(
     if best_state is not None:
         model.load_state_dict(best_state)
         if verbose:
-            print(f"restored weights from epoch {best_epoch} ({metric_name} = {abs(best_score):.4f})")
+            print(
+                f"restored weights from epoch {best_epoch} ({metric_name} = {abs(best_score):.4f})"
+            )
 
     return {
         "train_config": cfg.to_dict(),
