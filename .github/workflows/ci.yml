@@ -47,6 +47,15 @@ jobs:
       - name: Set up Python
         run: uv python install 3.14
 
+      # xgboost's macOS wheel links against Homebrew's OpenMP at runtime
+      # (`@rpath/libomp.dylib`) rather than bundling it, and the hosted macOS
+      # runner does not have it preinstalled — every import of xgboost fails
+      # with "Library not loaded: @rpath/libomp.dylib" until this runs. This is
+      # xgboost's own documented fix, not a project-specific workaround.
+      - name: Install libomp (macOS, for xgboost)
+        if: runner.os == 'macOS'
+        run: brew install libomp
+
       - name: Install dependencies
         run: uv sync --group test
 
