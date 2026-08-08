@@ -19,6 +19,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+from conftest import TEST_BARRIER, TEST_HORIZON
 
 import backtest as bt
 import patchtst_folds as pf
@@ -29,11 +30,15 @@ from patchtst_train import TrainConfig
 
 pytestmark = pytest.mark.slow
 
-# The lookback is shrunk to keep the model tiny, but the horizon stays at the
-# production value: it is what sets the barrier-touch rate, and at a short
-# horizon almost nothing resolves (5% at 20 bars against 34% at 60), which would
-# leave the side model with a dozen training rows and test nothing.
-WINDOW, HORIZON = 32, 60
+# The lookback is shrunk to keep the model tiny; the barrier and horizon are the
+# fixtures' own (`conftest.TEST_*`) rather than production's 60 bp over 3600 s.
+# An hour-long horizon would leave a 12,000-bar fixture with almost no labelled
+# windows, and a 60 bp barrier at any test-sized horizon resolves nothing — which
+# would not fail, it would empty the side-model population and leave these tests
+# asserting on nothing. What carries over is the touch rate, ~33% either way.
+WINDOW = 32
+HORIZON = TEST_HORIZON
+BARRIER = TEST_BARRIER
 
 
 @pytest.fixture
@@ -86,6 +91,7 @@ def test_train_folds_scores_every_test_window(fold_bars):
         folds,
         window=WINDOW,
         horizon=HORIZON,
+        barrier=BARRIER,
         config=tiny_model_config(),
         train_config=tiny_train_config(),
         train_stride=4,
@@ -109,6 +115,7 @@ def test_train_folds_reports_metadata_the_callers_read(fold_bars):
         two_folds(),
         window=WINDOW,
         horizon=HORIZON,
+        barrier=BARRIER,
         config=tiny_model_config(),
         train_config=tiny_train_config(),
         train_stride=4,
@@ -145,6 +152,7 @@ def test_on_fold_complete_fires_once_per_fold_with_that_folds_probabilities(fold
         folds,
         window=WINDOW,
         horizon=HORIZON,
+        barrier=BARRIER,
         config=tiny_model_config(),
         train_config=tiny_train_config(),
         train_stride=4,
@@ -166,6 +174,7 @@ def test_train_folds_writes_one_checkpoint_per_fold(fold_bars, tmp_path):
         folds,
         window=WINDOW,
         horizon=HORIZON,
+        barrier=BARRIER,
         config=tiny_model_config(),
         train_config=tiny_train_config(),
         train_stride=4,
@@ -187,6 +196,7 @@ def test_checkpoints_record_the_fold_they_were_trained_on(fold_bars, tmp_path):
         two_folds()[:1],
         window=WINDOW,
         horizon=HORIZON,
+        barrier=BARRIER,
         config=tiny_model_config(),
         train_config=tiny_train_config(),
         train_stride=4,
@@ -212,6 +222,7 @@ def test_a_time_budget_picks_a_stride_from_a_measured_probe(fold_bars):
         two_folds()[:1],
         window=WINDOW,
         horizon=HORIZON,
+        barrier=BARRIER,
         config=tiny_model_config(),
         train_config=tiny_train_config(),
         train_stride=None,
@@ -232,7 +243,7 @@ def _fold_inputs(bars):
     full = seq.build_channels(bars, "full")
     starts = seq.valid_window_starts(bars["price"].size, WINDOW, HORIZON)
     X = seq.build_tabular_features(full, bars["price"], starts, WINDOW)
-    precomputed = bt.barrier_arrays(bars["price"], HORIZON, seq.BARRIER)
+    precomputed = bt.barrier_arrays(bars["price"], HORIZON, BARRIER)
     side, _, defined = precomputed
     label_bar = starts + WINDOW - 1
     y_side = (side[label_bar] > 0).astype(np.int8)
@@ -252,7 +263,7 @@ def test_run_fold_fits_a_gate_and_every_side_model(fold_bars):
         touched,
         WINDOW,
         HORIZON,
-        seq.BARRIER,
+        BARRIER,
         purge=WINDOW + HORIZON - 1,
         patchtst_probs=None,
         train_stride=8,
@@ -282,7 +293,7 @@ def test_supplied_patchtst_probabilities_join_the_model_grid(fold_bars):
         touched,
         WINDOW,
         HORIZON,
-        seq.BARRIER,
+        BARRIER,
         purge=WINDOW + HORIZON - 1,
         patchtst_probs=supplied,
         train_stride=8,
@@ -313,7 +324,7 @@ def test_misaligned_probabilities_are_skipped_loudly_not_scored(fold_bars, capsy
         touched,
         WINDOW,
         HORIZON,
-        seq.BARRIER,
+        BARRIER,
         purge=WINDOW + HORIZON - 1,
         patchtst_probs={fold.name: np.full(7, 0.5, dtype=np.float32)},
         train_stride=8,
@@ -334,7 +345,7 @@ def test_backtest_fold_prices_every_model_gate_and_threshold(fold_bars):
         touched,
         WINDOW,
         HORIZON,
-        seq.BARRIER,
+        BARRIER,
         purge=WINDOW + HORIZON - 1,
         patchtst_probs=None,
         train_stride=8,
@@ -345,16 +356,20 @@ def test_backtest_fold_prices_every_model_gate_and_threshold(fold_bars):
         result,
         WINDOW,
         HORIZON,
-        seq.BARRIER,
+        BARRIER,
         bt.Costs(half_spread_bps=0.0),
         bt.Execution(),
         precomputed,
     )
 
     assert rows
+    # Derived, not written out: the round trip follows `Costs` defaults, and the
+    # point of the assertion is that every row was priced with the costs it was
+    # handed rather than that the default happens to be some particular number.
+    expected_cost = bt.breakeven_barrier_bps(bt.Costs(half_spread_bps=0.0), bt.Execution())
     for row in rows:
         assert row["n_trades"] >= 0
-        assert row["cost_bps"] == pytest.approx(6.0)
+        assert row["cost_bps"] == pytest.approx(expected_cost)
         assert "daily_pnl_bps" in row
 
 
@@ -372,7 +387,7 @@ def test_the_full_grid_pools_into_comparable_rows(fold_bars):
             touched,
             WINDOW,
             HORIZON,
-            seq.BARRIER,
+            BARRIER,
             purge=WINDOW + HORIZON - 1,
             patchtst_probs=None,
             train_stride=8,
@@ -382,7 +397,7 @@ def test_the_full_grid_pools_into_comparable_rows(fold_bars):
             result,
             WINDOW,
             HORIZON,
-            seq.BARRIER,
+            BARRIER,
             bt.Costs(half_spread_bps=0.0),
             bt.Execution(),
             precomputed,
@@ -399,7 +414,7 @@ def test_the_full_grid_pools_into_comparable_rows(fold_bars):
 
 def test_build_sequence_dataset_produces_purged_ordered_splits(fold_bars):
     dataset = seq.build_sequence_dataset(
-        fold_bars, window=WINDOW, horizon=HORIZON, train_frac=0.7, val_frac=0.1
+        fold_bars, window=WINDOW, horizon=HORIZON, barrier=BARRIER, train_frac=0.7, val_frac=0.1
     )
 
     train, val, test = (dataset.splits[k] for k in ("train", "val", "test"))
@@ -409,7 +424,7 @@ def test_build_sequence_dataset_produces_purged_ordered_splits(fold_bars):
 
 
 def test_dataset_labels_and_positive_rate_line_up(fold_bars):
-    dataset = seq.build_sequence_dataset(fold_bars, window=WINDOW, horizon=HORIZON)
+    dataset = seq.build_sequence_dataset(fold_bars, window=WINDOW, horizon=HORIZON, barrier=BARRIER)
 
     for split in ("train", "val", "test"):
         labels = dataset.labels(split)
@@ -419,7 +434,7 @@ def test_dataset_labels_and_positive_rate_line_up(fold_bars):
 
 def test_dataset_channels_follow_the_requested_layout(fold_bars):
     dataset = seq.build_sequence_dataset(
-        fold_bars, window=WINDOW, horizon=HORIZON, channel_set="full"
+        fold_bars, window=WINDOW, horizon=HORIZON, barrier=BARRIER, channel_set="full"
     )
 
     assert dataset.channels.shape[1] == len(seq.CHANNEL_SETS["full"])

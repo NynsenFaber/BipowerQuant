@@ -40,6 +40,7 @@ slippage term are all out of scope.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -53,19 +54,40 @@ TRADING_DAYS = 365  # crypto trades continuously; no 252-day convention here
 # --- cost and execution assumptions ------------------------------------------
 
 
+# Mean cost of walking the book for a 0.1 BTC marketable order — `Execution`'s own
+# declared size — measured by `estimate_slippage_bps` over 48 hours sampled from
+# the January tape: 8.5 M trades, 45,697 qualifying sweeps. The project assumed
+# 0.5 bp before this was measured, which turns out to be roughly the right number
+# for a *5 BTC* order and about six times too much for the size it actually trades.
+# The median is 0.000 bp: at this size the order fills inside the touch without
+# walking any book at all, and the mean is carried entirely by a thin tail.
+MEASURED_SLIPPAGE_BPS = 0.076
+MEASURED_SLIPPAGE_SIZE_BTC = 0.1
+
+
 @dataclass
 class Costs:
     """Per-side trading costs, in basis points of notional.
 
-    Defaults are a Binance spot VIP tier: 2.5 bp taker, 0 bp maker. The project's
-    5 bp "round trip" is exactly `2 x taker_fee_bps`, which is worth staring at —
-    see `breakeven_barrier_bps`.
+    Two of the three components are measured from the tape and one is not, which
+    is worth keeping straight because the one that is not dominates:
+
+    * `half_spread_bps` — measured, `estimate_half_spread_bps`. ~0.0007 bp.
+    * `slippage_bps` — measured, `estimate_slippage_bps`. ~0.076 bp at 0.1 BTC.
+    * `taker_fee_bps` — **an assumption.** A fee is a property of an account's VIP
+      tier, not of the trade tape, so no amount of data settles it. The 2.5 bp
+      default is a high Binance spot tier; a retail account pays 10 bp, four times
+      as much, and the round trip moves from 5.2 bp to 20.2 bp with it.
+
+    So ~97% of the round trip below is the term that was never measured. Any
+    result here should be read against `--taker-fee-bps` rather than as a fact
+    about the instrument.
     """
 
     taker_fee_bps: float = 2.5
     maker_fee_bps: float = 0.0
     half_spread_bps: float | None = None  # None -> estimate from the tape
-    slippage_bps: float = 0.5  # extra adverse move on a marketable order
+    slippage_bps: float = MEASURED_SLIPPAGE_BPS
 
     def round_trip_bps(self, entry: str, exit_: str) -> float:
         def side(kind: str) -> float:
@@ -178,6 +200,143 @@ def roll_half_spread_bps(price: np.ndarray, block: int = SECONDS_PER_DAY) -> flo
     return estimate_half_spread_bps(price, block)["half_spread_bps"]
 
 
+# --- slippage, from the tape rather than assumed --------------------------------
+
+
+def sweep_slippage_bps(
+    price: np.ndarray,
+    qty: np.ndarray,
+    is_buyer_maker: np.ndarray,
+    size_btc: float = 0.1,
+) -> np.ndarray:
+    """Per-sweep cost, in bp, of executing `size_btc` marketably. Tick-level.
+
+    A run of consecutive trades on the same side of the book *is* one or more
+    market orders walking that book: each print is a resting order being consumed,
+    and the price ratchets away as the order eats through successive levels. So
+    the cost of a marketable order of a given size is directly observable from the
+    public trade tape, without any depth data — take the first `size_btc` of a
+    run, volume-weight it, and compare against the price of the run's first print.
+
+    Measured **against the first fill, not the mid**, deliberately. Crossing the
+    touch is the half-spread, which `estimate_half_spread_bps` already prices;
+    what this adds is everything beyond it. Quoting it from the mid instead would
+    double-count the spread inside `Costs.round_trip_bps`.
+
+    The sample is conditional: runs that never accumulate `size_btc` are dropped,
+    because no order of that size traded there. That biases the estimate toward
+    busier moments, which is the conservative direction — and the callers report
+    how much of the tape survived, so the conditioning is visible rather than
+    buried.
+
+    Sign convention: positive is adverse. An aggressive buy pays *more* than its
+    first print, an aggressive sell receives *less*, and both come back positive.
+    """
+    price = np.asarray(price, dtype=np.float64)
+    qty = np.asarray(qty, dtype=np.float64)
+    aggressive_buy = ~np.asarray(is_buyer_maker, dtype=bool)
+    if price.size == 0:
+        return np.empty(0, dtype=np.float64)
+
+    # Cumulative sums carry a leading zero so a run starting at index 0 needs no
+    # special case: everything below indexes them as `cum[i]` = total *before* i.
+    cum_qty = np.concatenate(([0.0], np.cumsum(qty)))
+    cum_notional = np.concatenate(([0.0], np.cumsum(price * qty)))
+
+    changed = np.flatnonzero(aggressive_buy[1:] != aggressive_buy[:-1]) + 1
+    run_start = np.concatenate(([0], changed))
+    run_end = np.concatenate((changed, [price.size]))  # exclusive
+
+    # The trade that completes the order: the first print whose running total
+    # reaches `size_btc`. `cum_qty` is globally increasing, so one searchsorted
+    # over the whole array answers it for every run at once.
+    last = np.searchsorted(cum_qty, cum_qty[run_start] + size_btc, side="left") - 1
+    filled = last < run_end  # runs too small to fill the order at all
+    if not filled.any():
+        return np.empty(0, dtype=np.float64)
+
+    start, stop = run_start[filled], last[filled]
+    # Whole prints up to `stop`, plus however much of `stop` itself is needed.
+    remainder = size_btc - (cum_qty[stop] - cum_qty[start])
+    notional = (cum_notional[stop] - cum_notional[start]) + price[stop] * remainder
+    vwap = notional / size_btc
+
+    signed = np.where(aggressive_buy[start], 1.0, -1.0)
+    return signed * (vwap / price[start] - 1.0) / BPS
+
+
+def estimate_slippage_bps(
+    trades_csv: str | Path,
+    size_btc: float = 0.1,
+    sample_hours: int = 24,
+    seed: int = 3,
+) -> dict:
+    """Slippage per marketable side, measured from a sample of the raw tape.
+
+    The project used to assume 0.5 bp. It does not have to: the archive carries
+    `price`, `qty` and `is_buyer_maker` for all 742 M trades, which is enough to
+    observe what an order of a given size actually pays (see `sweep_slippage_bps`).
+
+    `sample_hours` whole hours are drawn at random across the file rather than
+    taken from the front, since the first hours of a month are one regime and the
+    cost of crossing depends on the regime. Reading the file is a single streaming
+    pass; the sample itself is small.
+
+    The headline number is the **mean**, not the median, because expected P&L is
+    linear in cost: what a strategy pays over many trades is the average, and the
+    tail from thin moments is part of that bill rather than an outlier to trim.
+    The median is reported next to it, and on this instrument the gap between them
+    is the whole story — at 0.1 BTC the median is 0.000 bp (the order fills inside
+    the touch, walking no book at all) while the mean is ~0.08 bp.
+    """
+    import polars as pl  # local: the backtest itself needs no dataframe library
+
+    from data_feeder import get_lazy_feeder
+
+    lazy = get_lazy_feeder(str(trades_csv))
+    bounds = lazy.select(
+        pl.col("time").min().alias("lo"), pl.col("time").max().alias("hi")
+    ).collect()
+    lo, hi = bounds["lo"][0], bounds["hi"][0]
+
+    total_hours = max(int((hi - lo).total_seconds() // 3600), 1)
+    rng = np.random.default_rng(seed)
+    chosen = rng.choice(total_hours, size=min(sample_hours, total_hours), replace=False)
+
+    offsets = pl.Series("h", np.sort(chosen).astype(np.int64))
+    hour = ((pl.col("time") - lo).dt.total_seconds() // 3600).cast(pl.Int64)
+    sample = (
+        lazy.filter(hour.is_in(offsets))
+        .select("price", "qty", "is_buyer_maker", hour.alias("hour"))
+        .collect(engine="streaming")
+    )
+
+    per_hour = [
+        sweep_slippage_bps(
+            block["price"].to_numpy(),
+            block["qty"].to_numpy(),
+            block["is_buyer_maker"].to_numpy(),
+            size_btc,
+        )
+        for (_,), block in sample.group_by("hour", maintain_order=True)
+    ]
+    costs = np.concatenate(per_hour) if per_hour else np.empty(0)
+    if costs.size == 0:
+        raise ValueError(f"no run in the sample reached {size_btc} BTC; lower --slippage-size-btc")
+
+    return {
+        "slippage_bps": float(costs.mean()),
+        "median_bps": float(np.median(costs)),
+        "p95_bps": float(np.percentile(costs, 95)),
+        "size_btc": size_btc,
+        "n_sweeps": int(costs.size),
+        "n_trades_sampled": int(sample.height),
+        "sample_hours": int(len(chosen)),
+        "source": Path(trades_csv).name,
+        "method": "VWAP of the first size_btc of a same-side run, vs the run's first print",
+    }
+
+
 def breakeven_barrier_bps(costs: Costs, execution: Execution) -> float:
     """Barrier width at which a *perfect* predictor earns exactly zero.
 
@@ -185,8 +344,56 @@ def breakeven_barrier_bps(costs: Costs, execution: Execution) -> float:
     cannot make money at any accuracy unless `barrier > round_trip`. This is a
     property of the target definition, not of the model, and it is the first
     thing to check before reading any Sharpe.
+
+    It is a *necessary* condition and a weak one. `required_hit_rate` is the
+    sufficient one, and it is the number a target should actually be chosen on.
     """
     return costs.round_trip_bps(execution.entry, execution.exit)
+
+
+def required_hit_rate(
+    resolved_share: float,
+    gross_magnitude_bps: float,
+    costs: Costs,
+    execution: Execution,
+) -> float:
+    """The hit rate a side model must reach for the target to break even.
+
+    The identity usually quoted for a triple barrier is `E = B(2h-1) - c`, which
+    assumes every trade ends at `+B` or `-B`. It does not. A position closed by
+    the vertical barrier exits at whatever the price happens to be — near zero on
+    average — and still pays the full round trip. Writing `rho` for the share of
+    trades that reach a horizontal barrier and `G` for the magnitude actually
+    captured when one is reached (the barrier *plus* the overshoot through it,
+    since barriers are detected on a 1-second grid), the honest expectation is
+
+        E = rho * G * (2h - 1) - c
+
+    and setting it to zero gives
+
+        h* = 1/2 * (1 + c / (rho * G))
+
+    Two things fall out of the `rho` term that the `B(2h-1)` form hides:
+
+    * **Widening the barrier at a fixed horizon can make the target worse.** `G`
+      grows roughly linearly in `B` while `rho` collapses faster, so `rho * G`
+      has an interior maximum. On this instrument at a 60-second deadline that
+      maximum sits near 5 bp, which is why raising the barrier to meet a 6 bp
+      round trip *raises* the required hit rate rather than lowering it.
+    * **Barrier and horizon have to be chosen together.** `rho * G` is what a
+      trade is paid for holding a position, and only a longer deadline grows it.
+
+    `h*` is a property of the label geometry and the cost, so it can be measured
+    on training data before any model is fitted — which is what makes it usable
+    as a selection criterion that never touches the test months.
+
+    Returns `nan` when nothing resolves, and can exceed 1.0, which is the honest
+    reading: no achievable accuracy pays for that target.
+    """
+    payoff = resolved_share * gross_magnitude_bps
+    if payoff <= 0:
+        return float("nan")
+    return 0.5 * (1.0 + breakeven_barrier_bps(costs, execution) / payoff)
 
 
 # --- passive fills ------------------------------------------------------------

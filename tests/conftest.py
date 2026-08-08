@@ -37,6 +37,29 @@ import pytest  # noqa: E402
 # 2026-01-01 00:00:00 UTC, the first second of the real dataset's first month.
 EPOCH = int(datetime(2026, 1, 1, tzinfo=UTC).timestamp())
 
+# The fixtures' own triple barrier, and deliberately **not** `seq.BARRIER` /
+# `seq.HORIZON`.
+#
+# Production is 60 bp over 3600 seconds. Neither number can be reused here. An
+# hour-long horizon leaves a 2,000-bar fixture with no labelled windows at all,
+# and a 60 bp barrier at a test-sized horizon resolves essentially nothing — which
+# would not fail, it would quietly empty the side-model population and turn a
+# dozen tests into assertions about nothing.
+#
+# What has to carry over is the *touch rate*, since that is the property the
+# fixtures exist to exercise. 5 bp over 60 bars puts 33-40% of these windows
+# through a barrier, against 36.5% for the real target on the real tape. Both
+# degenerate regimes hide bugs: if everything resolves the vertical barrier is
+# never exercised and overshoot swamps the barrier width; if almost nothing does,
+# a broken filter looks fine because there was nothing to filter.
+TEST_BARRIER = 0.0005
+TEST_HORIZON = 60
+
+# The same rate at the shorter horizon some tests use to stay fast: 3 bp over 20
+# bars resolves 27-29%.
+TEST_BARRIER_SHORT = 0.0003
+TEST_HORIZON_SHORT = 20
+
 
 def make_bars(
     n_bars: int = 2_000,
@@ -50,11 +73,10 @@ def make_bars(
 
     A geometric random walk on a gap-free 1-second grid. `volatility` is the
     per-bar log-return standard deviation, and the default is calibrated rather
-    than arbitrary: it puts ~34% of 60-second windows through a 5 bp barrier,
-    against 39.7% in the real six months. That matters because both degenerate
-    regimes hide real bugs — at high volatility every window resolves, so the
-    vertical barrier is never exercised and overshoot swamps the barrier width;
-    at low volatility almost nothing resolves and the side label is nearly empty.
+    than arbitrary: it puts 33-40% of `TEST_HORIZON`-second windows through a
+    `TEST_BARRIER`, against the 36.5% the production target resolves on the real
+    six months. See those constants for why the fixtures use a target of their own
+    rather than the production one.
 
     `empty_every` marks every n-th bar trade-less — forward-filled price, zero
     volume, zero flow — which is how `_to_regular_grid` represents the ~11% of

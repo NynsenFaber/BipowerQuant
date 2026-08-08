@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import TEST_BARRIER, TEST_HORIZON
 
 import backtest as bt
 
@@ -41,15 +42,45 @@ def test_unset_half_spread_is_treated_as_zero_not_an_error():
     assert costs.round_trip_bps("taker", "taker") == pytest.approx(6.0)
 
 
-def test_the_projects_headline_round_trip_is_six_basis_points():
-    """2.5 bp taker + 0.5 bp slippage a side, spread negligible — against a 5 bp barrier.
+def test_the_round_trip_is_dominated_by_the_one_term_that_is_not_measured():
+    """Fee 2.5 bp, spread ~0.001 bp, slippage ~0.08 bp — per side.
 
-    This is the number the whole "the target was defined below its own cost"
-    finding turns on, so it is pinned here rather than recomputed in prose.
+    The composition matters more than the total. Both measured components are
+    rounding errors next to the fee, which is an assumption about an account's VIP
+    tier that no amount of tape can settle. A reader who takes the round trip as a
+    property of BTC/USDT rather than of the fee schedule will draw the wrong
+    conclusion from every net P&L in the project.
     """
-    breakeven = bt.breakeven_barrier_bps(
-        bt.Costs(half_spread_bps=0.0), bt.Execution(entry="taker", exit="taker")
+    costs = bt.Costs(half_spread_bps=0.0007)
+    breakeven = bt.breakeven_barrier_bps(costs, bt.Execution(entry="taker", exit="taker"))
+
+    measured_share = 2 * (costs.half_spread_bps + costs.slippage_bps) / breakeven
+    assert measured_share < 0.05, "the measured components should be a rounding error"
+    assert breakeven == pytest.approx(5.15, abs=0.05)
+
+
+def test_a_retail_fee_tier_quadruples_the_round_trip():
+    """10 bp taker is what an account without volume pays, and it is not a detail."""
+    vip = bt.breakeven_barrier_bps(bt.Costs(half_spread_bps=0.0), bt.Execution())
+    retail = bt.breakeven_barrier_bps(
+        bt.Costs(taker_fee_bps=10.0, half_spread_bps=0.0), bt.Execution()
     )
+
+    assert retail > 3.5 * vip
+
+
+def test_the_original_five_basis_point_target_could_not_pay_its_own_round_trip():
+    """The project's founding finding, pinned with explicit constants.
+
+    Every number here is written out rather than read from a default, because the
+    point is historical: at the cost model the project assumed at the time — 2.5 bp
+    fee and 0.5 bp slippage a side — a 5 bp barrier sat *below* its 6 bp round trip
+    and no accuracy could rescue it. Later runs move the defaults; this record of
+    why the target was changed must not move with them.
+    """
+    original = bt.Costs(taker_fee_bps=2.5, half_spread_bps=0.0, slippage_bps=0.5)
+    breakeven = bt.breakeven_barrier_bps(original, bt.Execution(entry="taker", exit="taker"))
+
     assert breakeven == pytest.approx(6.0)
     assert breakeven > 5.0, "a 5 bp barrier cannot pay a 6 bp round trip"
 
@@ -60,6 +91,115 @@ def test_maker_entry_halves_the_round_trip():
     maker = bt.breakeven_barrier_bps(costs, bt.Execution(entry="maker", exit="taker"))
 
     assert maker == pytest.approx(taker / 2)
+
+
+# --- the hit rate a target requires -------------------------------------------
+
+# A round 6 bp round trip, written out rather than taken from the defaults: these
+# tests pin an identity, and an identity checked against a moving constant checks
+# nothing. `test_the_round_trip_is_dominated_by...` covers the live default.
+_TAKER = (
+    bt.Costs(taker_fee_bps=2.5, half_spread_bps=0.0, slippage_bps=0.5),
+    bt.Execution(entry="taker", exit="taker"),
+)
+
+
+def test_required_hit_rate_matches_the_identity():
+    """h* = 1/2 (1 + c / (rho * G)), against two cells computed by hand."""
+    # Everything resolves and captures exactly the round trip: you must win every
+    # trade, because a loss gives back precisely what a win earned.
+    assert bt.required_hit_rate(1.0, 6.0, *_TAKER) == pytest.approx(1.0)
+
+    # 40 bp captured on 57.5% of trades -> 6 / 23.0 = 0.2609 -> h* = 0.6304
+    assert bt.required_hit_rate(0.575, 40.0, *_TAKER) == pytest.approx(0.5 * (1 + 6.0 / 23.0))
+
+
+def test_required_hit_rate_exceeds_one_when_the_target_cannot_pay():
+    """Not clamped. A target needing h > 1 should say so rather than round to 1.0."""
+    # The project's original target: 46% of windows resolve, capturing ~6 bp.
+    assert bt.required_hit_rate(0.46, 6.0, *_TAKER) > 1.0
+
+
+def test_required_hit_rate_is_undefined_when_nothing_resolves():
+    assert np.isnan(bt.required_hit_rate(0.0, 40.0, *_TAKER))
+    assert np.isnan(bt.required_hit_rate(0.5, 0.0, *_TAKER))
+
+
+def test_a_wider_barrier_can_make_a_target_worse():
+    """The correction the `B(2h-1)` form hides, asserted rather than argued.
+
+    Raising the barrier to "cover the round trip" looks like it must help, and at
+    a fixed deadline it does not: `rho` falls faster than `G` grows. These are the
+    measured Jan-Mar values at a 60-second horizon, where widening 5 bp -> 6 bp
+    costs 8 points of resolved share to buy 1 bp of payoff.
+    """
+    at_five = bt.required_hit_rate(0.461, 6.05, *_TAKER)
+    at_six = bt.required_hit_rate(0.382, 7.10, *_TAKER)
+
+    assert at_six > at_five > 1.0
+
+
+def test_a_longer_horizon_is_what_actually_lowers_the_bar():
+    """The same 40 bp barrier, at 30 minutes and at 60. Only the deadline moved."""
+    at_1800 = bt.required_hit_rate(0.377, 41.72, *_TAKER)
+    at_3600 = bt.required_hit_rate(0.575, 41.70, *_TAKER)
+
+    assert at_3600 < at_1800 < 1.0
+
+
+def test_maker_execution_lowers_the_required_hit_rate():
+    costs = bt.Costs(half_spread_bps=0.0)
+    taker = bt.required_hit_rate(0.575, 40.0, costs, bt.Execution(entry="taker", exit="taker"))
+    maker = bt.required_hit_rate(0.575, 40.0, costs, bt.Execution(entry="maker", exit="taker"))
+
+    # Half the cost is half the distance from a coin flip, not half the hit rate.
+    assert maker - 0.5 == pytest.approx((taker - 0.5) / 2)
+
+
+# --- slippage, measured from the tape -----------------------------------------
+
+
+def test_sweep_slippage_prices_walking_up_the_book():
+    """An aggressive buy filling 0.1 BTC across three ascending prints."""
+    price = np.array([100.0, 100.01, 100.02, 99.99])
+    qty = np.array([0.04, 0.04, 0.05, 0.20])
+    is_buyer_maker = np.array([False, False, False, True])
+
+    out = bt.sweep_slippage_bps(price, qty, is_buyer_maker, size_btc=0.1)
+
+    # 0.04 at 100.00, 0.04 at 100.01, and 0.02 of the third print at 100.02.
+    vwap = (100.0 * 0.04 + 100.01 * 0.04 + 100.02 * 0.02) / 0.1
+    assert out.size == 2  # one buy run, one sell run
+    assert out[0] == pytest.approx((vwap / 100.0 - 1.0) / bt.BPS)
+
+
+def test_sweep_slippage_is_positive_for_a_seller_too():
+    """Adverse is adverse. A sell walking *down* the book must not come back negative."""
+    price = np.array([100.0, 99.99, 99.98])
+    qty = np.array([0.05, 0.05, 0.05])
+    selling = np.array([True, True, True])
+
+    out = bt.sweep_slippage_bps(price, qty, selling, size_btc=0.1)
+
+    assert out.size == 1
+    assert out[0] > 0.0
+
+
+def test_sweep_slippage_skips_runs_that_never_fill_the_order():
+    """A run smaller than the order size executed no such order; it is not a 0 bp fill."""
+    price = np.array([100.0, 100.5, 101.0])
+    qty = np.array([0.001, 0.001, 0.001])
+    alternating = np.array([False, True, False])
+
+    assert bt.sweep_slippage_bps(price, qty, alternating, size_btc=0.1).size == 0
+
+
+def test_sweep_slippage_is_zero_when_one_print_fills_the_whole_order():
+    """No book was walked, so there is nothing to pay beyond the touch."""
+    out = bt.sweep_slippage_bps(
+        np.array([100.0, 100.0]), np.array([5.0, 5.0]), np.array([False, True]), size_btc=0.1
+    )
+    assert out == pytest.approx([0.0, 0.0])
 
 
 # --- the spread ---------------------------------------------------------------
@@ -417,7 +557,13 @@ def test_unresolved_trades_are_counted_separately_from_losses(long_bars):
     """
     entry_bars = np.arange(0, 2_000, dtype=np.int64)
     result = bt.simulate(
-        long_bars, entry_bars, np.ones(2_000, dtype=np.int64), costs=_costless(), bootstrap=0
+        long_bars,
+        entry_bars,
+        np.ones(2_000, dtype=np.int64),
+        barrier=TEST_BARRIER,
+        horizon=TEST_HORIZON,
+        costs=_costless(),
+        bootstrap=0,
     )
     s = result.summary
 
@@ -487,12 +633,11 @@ def test_precomputed_barriers_give_the_same_answer(long_bars):
     """The sweep's optimisation must not change the result it optimises."""
     entry_bars = np.arange(0, 1_000, dtype=np.int64)
     direction = np.ones(1_000, dtype=np.int64)
-    precomputed = bt.barrier_arrays(long_bars["price"], 60, 0.0005)
+    precomputed = bt.barrier_arrays(long_bars["price"], TEST_HORIZON, TEST_BARRIER)
 
-    fresh = bt.simulate(long_bars, entry_bars, direction, costs=_costless(), bootstrap=0)
-    reused = bt.simulate(
-        long_bars, entry_bars, direction, costs=_costless(), bootstrap=0, precomputed=precomputed
-    )
+    shared = dict(barrier=TEST_BARRIER, horizon=TEST_HORIZON, costs=_costless(), bootstrap=0)
+    fresh = bt.simulate(long_bars, entry_bars, direction, **shared)
+    reused = bt.simulate(long_bars, entry_bars, direction, **shared, precomputed=precomputed)
 
     np.testing.assert_array_equal(fresh.trades["entry_bar"], reused.trades["entry_bar"])
     np.testing.assert_allclose(fresh.trades["net_bps"], reused.trades["net_bps"])
@@ -521,13 +666,15 @@ def test_summary_reports_the_assumptions_it_used(long_bars):
         long_bars,
         np.arange(0, 500, dtype=np.int64),
         np.ones(500, dtype=np.int64),
+        barrier=TEST_BARRIER,
+        horizon=TEST_HORIZON,
         costs=costs,
         bootstrap=0,
     )
 
     assert result.summary["costs"]["taker_fee_bps"] == 1.0
     assert result.summary["half_spread_bps"] == 0.2
-    assert result.summary["barrier_bps"] == pytest.approx(5.0)
+    assert result.summary["barrier_bps"] == pytest.approx(TEST_BARRIER / bt.BPS)
 
 
 def test_a_missing_half_spread_is_estimated_from_the_tape(long_bars):

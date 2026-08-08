@@ -78,6 +78,68 @@ def test_month_blocks_skips_a_month_with_no_data():
     assert [label for label, _, _ in blocks] == ["2026-01", "2026-04"]
 
 
+# --- month slicing, for choosing a target on training data only ----------------
+
+
+def month_bars(months: list[str], per_month: int = 200) -> dict:
+    """A bar dict spanning whole months, shaped like `sequence_matrix.load_bars`."""
+    ts = month_timestamps(months, per_month)
+    n = ts.size
+    return {
+        "ts": ts,
+        "price": np.linspace(70_000.0, 71_000.0, n),
+        "qty": np.ones(n, dtype=np.float32),
+        "n_trades": np.full(n, 4.0, dtype=np.float32),
+        "ofi": np.zeros(n, dtype=np.float32),
+        "meta": {
+            "source": "synthetic",
+            "n_bars": n,
+            "first_ts": int(ts[0]),
+            "last_ts": int(ts[-1]),
+        },
+    }
+
+
+def test_slice_months_keeps_only_the_named_months():
+    sliced = wf.slice_months(month_bars(SIX_MONTHS), ["2026-01", "2026-02", "2026-03"])
+
+    assert [label for label, _, _ in wf.month_blocks(sliced["ts"])] == [
+        "2026-01",
+        "2026-02",
+        "2026-03",
+    ]
+    assert sliced["meta"]["n_bars"] == sliced["ts"].size
+    assert sliced["meta"]["months"] == ["2026-01", "2026-02", "2026-03"]
+
+
+def test_slice_months_slices_every_series_together():
+    """A bar dict whose arrays disagree on length would corrupt every downstream label."""
+    bars = month_bars(SIX_MONTHS)
+    sliced = wf.slice_months(bars, ["2026-02", "2026-03"])
+
+    lengths = {key: sliced[key].size for key in ("ts", "price", "qty", "n_trades", "ofi")}
+    assert len(set(lengths.values())) == 1
+    assert sliced["price"][0] == bars["price"][wf.month_blocks(bars["ts"])[1][1]]
+
+
+def test_slice_months_rejects_a_month_that_is_not_there():
+    with pytest.raises(SystemExit, match="2026-09"):
+        wf.slice_months(month_bars(SIX_MONTHS), ["2026-01", "2026-09"])
+
+
+def test_slice_months_rejects_a_gap_that_would_fake_a_jump():
+    """Splicing January onto March leaves a price seam a triple barrier reads as a move."""
+    with pytest.raises(SystemExit, match="contiguous"):
+        wf.slice_months(month_bars(SIX_MONTHS), ["2026-01", "2026-03"])
+
+
+def test_slice_months_accepts_the_months_in_any_order():
+    out_of_order = wf.slice_months(month_bars(SIX_MONTHS), ["2026-03", "2026-01", "2026-02"])
+    in_order = wf.slice_months(month_bars(SIX_MONTHS), ["2026-01", "2026-02", "2026-03"])
+
+    np.testing.assert_array_equal(out_of_order["ts"], in_order["ts"])
+
+
 # --- fold construction --------------------------------------------------------
 
 

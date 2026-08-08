@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import TEST_BARRIER_SHORT
 
 import patchtst_folds as pf
 import sequence_matrix as seq
@@ -25,7 +26,9 @@ ml_matrix = pytest.importorskip(
 
 
 def test_training_matrix_has_one_row_per_resolved_window(bars):
-    X, y, starts = ml_matrix.build_training_matrix(bars, window=50, horizon=20)
+    X, y, starts = ml_matrix.build_training_matrix(
+        bars, window=50, horizon=20, barrier=TEST_BARRIER_SHORT
+    )
 
     assert X.shape[0] == y.size == starts.size
     assert X.shape[1] == len(seq.TABULAR_FEATURE_NAMES) == 7
@@ -34,8 +37,10 @@ def test_training_matrix_has_one_row_per_resolved_window(bars):
 
 def test_training_matrix_drops_windows_with_no_side(bars):
     """The side model has nothing to learn from a window that never resolved."""
-    X, _, starts = ml_matrix.build_training_matrix(bars, window=50, horizon=20)
-    side, _, defined = seq.triple_barrier(bars["price"], horizon=20, barrier=seq.BARRIER)
+    X, _, starts = ml_matrix.build_training_matrix(
+        bars, window=50, horizon=20, barrier=TEST_BARRIER_SHORT
+    )
+    side, _, defined = seq.triple_barrier(bars["price"], horizon=20, barrier=TEST_BARRIER_SHORT)
 
     label_bar = starts + 50 - 1
     assert np.all(side[label_bar] != 0)
@@ -47,7 +52,7 @@ def test_training_matrix_drops_windows_with_no_side(bars):
 def test_the_gate_label_keeps_every_window(bars):
     """`barrier_touched` is defined everywhere, so nothing is filtered out."""
     _, y, starts = ml_matrix.build_training_matrix(
-        bars, window=50, horizon=20, label_mode="barrier_touched"
+        bars, window=50, horizon=20, barrier=TEST_BARRIER_SHORT, label_mode="barrier_touched"
     )
 
     assert starts.size == seq.valid_window_starts(bars["price"].size, 50, 20).size
@@ -55,7 +60,9 @@ def test_the_gate_label_keeps_every_window(bars):
 
 
 def test_training_matrix_is_finite(bars):
-    X, _, _ = ml_matrix.build_training_matrix(bars, window=50, horizon=20)
+    X, _, _ = ml_matrix.build_training_matrix(
+        bars, window=50, horizon=20, barrier=TEST_BARRIER_SHORT
+    )
     assert np.all(np.isfinite(X))
 
 
@@ -83,7 +90,9 @@ def test_the_two_feature_paths_agree(bars):
     error would mean the two halves of the project describe different windows.
     """
     window, horizon = 50, 20
-    X_cpp, _, starts = ml_matrix.build_training_matrix(bars, window=window, horizon=horizon)
+    X_cpp, _, starts = ml_matrix.build_training_matrix(
+        bars, window=window, horizon=horizon, barrier=TEST_BARRIER_SHORT
+    )
 
     channels = seq.build_channels(bars, "full")
     X_py = seq.build_tabular_features(channels, bars["price"], starts, window)

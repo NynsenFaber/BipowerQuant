@@ -121,8 +121,24 @@ def figure_walkforward(data: dict, path: Path) -> None:
         fontweight="bold",
     )
 
+    # Read off the panels rather than asserted. "Direction does not [survive]" was
+    # true of the tabular models alone; a side model that clears 0.52 in every
+    # fold falsifies it, and the headline has to follow the bars it sits above.
+    # 0.52 is the threshold the appendix names as the boundary of a real edge.
+    best_side = max((min(f["side_auc"][m] for f in folds), m) for m in folds[0]["side_auc"])
+    worst_of_best, best_model = best_side
+    if worst_of_best < 0.52:
+        headline = (
+            "Volatility forecasts survive a month they were not trained on. Direction does not."
+        )
+    else:
+        headline = (
+            "Volatility transfers across months. So does direction — but only for "
+            f"{best_model}, and only just."
+        )
+
     fig.suptitle(
-        "Volatility forecasts survive a month they were not trained on. Direction does not.",
+        headline,
         fontsize=11.5,
         color=INK,
         x=0.008,
@@ -144,11 +160,21 @@ def figure_walkforward(data: dict, path: Path) -> None:
 
 
 def figure_economics(data: dict, path: Path) -> None:
-    """The barrier a given hit rate needs before it pays for its own costs."""
-    cost = data["config"]["breakeven_barrier_bps"]
-    barrier = data["config"]["barrier_bps"]
+    """The payoff a given hit rate needs before it pays for its own costs.
 
-    hits = np.linspace(0.505, 0.75, 400)
+    The x axis is the hit rate among *resolved* trades and the y axis is the
+    expected payoff per trade — `rho * G`, the share of positions that reach a
+    horizontal barrier times the magnitude captured when one does. Plotting `rho *
+    G` rather than the barrier `B` is the correction this figure exists to make:
+    the two are not interchangeable, because widening `B` at a fixed deadline
+    lowers `rho`, and a chart drawn against `B` implies a lever that does not
+    exist.
+    """
+    cost = data["config"]["breakeven_barrier_bps"]
+    target = data["config"]["target"]
+    payoff = target["resolved_share"] * target["captured_bps"]
+
+    hits = np.linspace(0.505, 0.80, 400)
     required = cost / (2 * hits - 1)
 
     fig, ax = plt.subplots(figsize=(8.0, 4.4))
@@ -156,20 +182,21 @@ def figure_economics(data: dict, path: Path) -> None:
     ax.fill_between(hits * 100, required, 1e4, color=AQUA, alpha=0.12)
     ax.fill_between(hits * 100, 0, required, color=ORANGE, alpha=0.12)
 
-    ax.axhline(barrier, color=ORANGE, linewidth=1.4, linestyle=(0, (4, 3)))
+    ax.axhline(payoff, color=ORANGE, linewidth=1.4, linestyle=(0, (4, 3)))
     ax.text(
-        74.5,
-        barrier * 1.12,
-        f"the barrier actually used: {barrier:.0f} bp",
+        79.5,
+        payoff * 1.12,
+        f"this target pays {payoff:.1f} bp per trade "
+        f"({target['resolved_share']:.0%} resolve x {target['captured_bps']:.0f} bp)",
         fontsize=8.5,
         color=ORANGE,
         ha="right",
     )
 
-    # `resolved_hit_rate`, not `hit_rate`: the break-even identity assumes every
-    # trade ends at +B or -B, so the denominator has to exclude positions closed
-    # by the clock. Mixing timeouts in drives h below 0.5 and the "required
-    # barrier" negative, which is arithmetic nonsense rather than a result.
+    # `resolved_hit_rate`, not `hit_rate`: the identity is about trades that ended
+    # at a barrier, so the denominator has to exclude positions closed by the
+    # clock. Mixing timeouts in drives h below 0.5 and the required payoff
+    # negative, which is arithmetic nonsense rather than a result.
     measured = [
         (r.get("resolved_hit_rate", float("nan")) * 100, r["model"])
         for r in data["pooled"]
@@ -181,7 +208,7 @@ def figure_economics(data: dict, path: Path) -> None:
         if lo <= hit <= hi:
             ax.plot(
                 [hit],
-                [barrier],
+                [payoff],
                 marker="o",
                 markersize=7,
                 color=BLUE,
@@ -191,39 +218,57 @@ def figure_economics(data: dict, path: Path) -> None:
             )
     if measured:
         best = max(h for h, _ in measured)
-        required = cost / (2 * best / 100 - 1) if best > 50 else float("inf")
+        needed = cost / (2 * best / 100 - 1) if best > 50 else float("inf")
         if lo <= best <= hi:
             ax.annotate(
                 f"measured: {best:.1f}%",
-                xy=(best, barrier),
-                xytext=(best + 2.5, barrier * 4.0),
+                xy=(best, payoff),
+                xytext=(best + 2.5, payoff * 4.0),
                 fontsize=9,
                 color=INK,
                 arrowprops=dict(arrowstyle="-", color=MUTED, linewidth=0.9),
             )
         note = (
-            f"Expected value per trade is B(2h-1) - c. At c = {cost:.1f} bp, the measured "
-            f"{best:.1f}% hit rate needs a {required:,.0f} bp barrier."
-            if np.isfinite(required)
-            else f"Expected value per trade is B(2h-1) - c. The measured hit rate of "
-            f"{best:.1f}% is at or below a coin flip, so no barrier makes it profitable."
+            f"Expected value per trade is (rho x G)(2h-1) - c. At c = {cost:.2f} bp, the "
+            f"measured {best:.1f}% hit rate needs {needed:,.0f} bp of payoff; this target "
+            f"supplies {payoff:.1f}. Break-even would need h = {target['required_hit_rate']:.1%}."
+            if np.isfinite(needed)
+            else f"Expected value per trade is (rho x G)(2h-1) - c. The measured hit rate of "
+            f"{best:.1f}% is at or below a coin flip, so no payoff makes it profitable."
         )
     else:
-        note = f"Expected value per trade is B(2h-1) - c, with c = {cost:.1f} bp."
+        note = (
+            f"Expected value per trade is (rho x G)(2h-1) - c, with c = {cost:.2f} bp. "
+            f"This target needs h = {target['required_hit_rate']:.1%} to break even."
+        )
 
+    # Limits chosen from the data: the payoff line and the break-even curve over
+    # the plotted hit rates must both be inside the axes at any (barrier, horizon),
+    # and a decade of headroom either side keeps the log grid readable.
+    span = np.concatenate((required, [payoff]))
     ax.set_yscale("log")
-    ax.set_xlim(50.5, 75)
-    ax.set_ylim(1, 3000)
+    ax.set_xlim(50.5, 80)
+    ax.set_ylim(10 ** np.floor(np.log10(span.min()) - 0.5), 10 ** np.ceil(np.log10(span.max())))
     ax.set_xlabel("Hit rate: how often the predicted barrier is touched first (%)", fontsize=9)
-    ax.set_ylabel("Barrier needed to break even (bp, log scale)", fontsize=9)
-    ax.set_yticks(
-        [1, 3, 10, 30, 100, 300, 1000, 3000], ["1", "3", "10", "30", "100", "300", "1000", "3000"]
-    )
+    ax.set_ylabel("Payoff per trade needed to break even (bp, log scale)", fontsize=9)
     _clean(ax)
-    ax.text(63, 700, "profitable", fontsize=10, color=AQUA, fontweight="bold")
-    ax.text(52.5, 2.2, "unprofitable", fontsize=10, color=ORANGE, fontweight="bold")
+    # Placed in axes fractions rather than data coordinates: the limits above are
+    # computed from the result, so a hardcoded position lands off-figure the first
+    # time the target changes.
+    ax.text(
+        0.55, 0.86, "profitable", transform=ax.transAxes, fontsize=10, color=AQUA, fontweight="bold"
+    )
+    ax.text(
+        0.04,
+        0.08,
+        "unprofitable",
+        transform=ax.transAxes,
+        fontsize=10,
+        color=ORANGE,
+        fontweight="bold",
+    )
     ax.set_title(
-        f"A {cost:.1f} bp round trip sets the price of being right",
+        f"A {cost:.2f} bp round trip sets the price of being right",
         fontsize=11.5,
         color=INK,
         pad=12,
@@ -304,8 +349,22 @@ def figure_backtest(data: dict, path: Path) -> None:
         fontweight="bold",
     )
 
+    # Chosen from the data, not asserted. The original title read "Gross P&L is
+    # zero, so net P&L is exactly minus the cost", which was true of the three
+    # tabular models and became false the moment PatchTST was added — its gross is
+    # an order of magnitude larger and consistently positive. A hardcoded headline
+    # would have kept claiming the old finding over a figure that disproved it.
+    best_gross = max(gross)
+    if best_gross < 0.05:
+        headline = "Gross P&L is zero, so net P&L is exactly minus the cost"
+    else:
+        leader = labels[int(np.argmax(gross))]
+        headline = (
+            f"{leader} earns a real {best_gross:+.2f} bp gross — against a {cost:.1f} bp round trip"
+        )
+
     fig.suptitle(
-        "Gross P&L is zero, so net P&L is exactly minus the cost",
+        headline,
         fontsize=11.5,
         color=INK,
         x=0.008,

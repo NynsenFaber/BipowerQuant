@@ -93,6 +93,43 @@ def month_blocks(ts: np.ndarray) -> list[tuple[str, int, int]]:
     return blocks
 
 
+def slice_months(bars: dict, labels: list[str]) -> dict:
+    """A new bar dict holding only the named `YYYY-MM` months, in order.
+
+    The point is target *selection*. Choosing a barrier and a horizon by looking
+    at how they behave on the months a model is later tested on would import the
+    answer through the target definition — a subtler version of the population
+    problem this whole module exists to fix, and one no amount of purging would
+    catch. Restricting the selection series to the training months makes the
+    choice reproducible from information available before the test period starts.
+
+    Raises on a label that is not present, rather than silently selecting less
+    data than asked for.
+    """
+    blocks = {label: (lo, hi) for label, lo, hi in month_blocks(bars["ts"])}
+    missing = [label for label in labels if label not in blocks]
+    if missing:
+        raise SystemExit(f"month(s) {missing} not in the bars; have {sorted(blocks)}")
+
+    # Contiguity is not a nicety here. Splicing non-adjacent months would leave a
+    # price discontinuity at the seam, and a triple barrier reads that jump as a
+    # genuine first passage — manufacturing touches out of a calendar gap.
+    spans = sorted(blocks[label] for label in labels)
+    if any(lo != previous_hi for (lo, _), (_, previous_hi) in zip(spans[1:], spans[:-1])):
+        raise SystemExit(f"months {sorted(labels)} are not contiguous; the seam would fake a jump")
+
+    keep = np.concatenate([np.arange(lo, hi) for lo, hi in spans])
+    out = {key: bars[key][keep] for key in ("ts", "price", "qty", "n_trades", "ofi")}
+    out["meta"] = {
+        **bars["meta"],
+        "n_bars": int(keep.size),
+        "first_ts": int(out["ts"][0]),
+        "last_ts": int(out["ts"][-1]),
+        "months": sorted(labels),
+    }
+    return out
+
+
 def build_folds(ts: np.ndarray, scheme: str = "anchored", train_months: int = 3) -> list[Fold]:
     blocks = month_blocks(ts)
     if len(blocks) <= train_months:
@@ -466,7 +503,13 @@ def main() -> None:
     parser.add_argument("--window", type=int, default=seq.WINDOW_SIZE)
     parser.add_argument("--taker-fee-bps", type=float, default=2.5)
     parser.add_argument("--maker-fee-bps", type=float, default=0.0)
-    parser.add_argument("--slippage-bps", type=float, default=0.5)
+    parser.add_argument(
+        "--slippage-bps",
+        type=float,
+        default=bt.MEASURED_SLIPPAGE_BPS,
+        help=f"per marketable side; the default is measured from the tape at "
+        f"{bt.MEASURED_SLIPPAGE_SIZE_BTC} BTC, not assumed",
+    )
     parser.add_argument(
         "--half-spread-bps",
         type=float,
@@ -499,11 +542,22 @@ def main() -> None:
     del full_channels  # ~750 MB at six months; the features are all we need now
 
     precomputed = bt.barrier_arrays(bars["price"], args.horizon, args.barrier)
-    side, _, defined = precomputed
+    side, exit_offset, defined = precomputed
     label_bar = starts + args.window - 1
     y_side = (side[label_bar] > 0).astype(np.int8)
     touched = ((side[label_bar] != 0) & defined[label_bar]).astype(np.int8)
     print(f"   {starts.size:,} windows | barrier touched in {touched.mean():.2%}")
+
+    # What this target pays, before any model: the share of positions that reach a
+    # horizontal barrier, and the magnitude captured when one is reached — the
+    # barrier plus the overshoot through it, since touches are detected on a
+    # 1-second grid. Recorded in the result so the figures and the README quote a
+    # number this run produced rather than one transcribed from a sweep.
+    resolved = touched.astype(bool)
+    exit_bar = label_bar + exit_offset[label_bar]
+    captured_bps = float(
+        (np.abs(bars["price"][exit_bar] / bars["price"][label_bar] - 1.0) / bt.BPS)[resolved].mean()
+    )
 
     folds = build_folds(bars["ts"], args.scheme, args.train_months)
     print(f"3. {len(folds)} {args.scheme} fold(s):")
@@ -527,9 +581,17 @@ def main() -> None:
         print(f"   Roll half-spread estimate: {costs.half_spread_bps:.4f} bp")
     execution = bt.Execution(entry=args.entry, exit=args.exit, queue_ahead_btc=args.queue_ahead_btc)
     breakeven = bt.breakeven_barrier_bps(costs, execution)
+    needed = bt.required_hit_rate(float(touched.mean()), captured_bps, costs, execution)
     print(
         f"   round trip {breakeven:.2f} bp vs barrier {args.barrier / bt.BPS:.2f} bp"
-        f"  ->  {'PROFITABLE ceiling' if args.barrier / bt.BPS > breakeven else 'NEGATIVE by construction'}"
+        f"  ->  {'oracle can profit' if args.barrier / bt.BPS > breakeven else 'NEGATIVE by construction'}"
+    )
+    print(
+        f"   resolves {touched.mean():.1%} of windows, capturing {captured_bps:.2f} bp when it does"
+    )
+    print(
+        f"   => the side model needs a {needed:.1%} hit rate to break even"
+        f"  ->  {'reachable' if needed < 0.65 else 'NOT REACHABLE by any model'}"
     )
 
     purge = args.window + args.horizon - 1
@@ -626,6 +688,13 @@ def main() -> None:
                 "execution": asdict(execution),
                 "breakeven_barrier_bps": breakeven,
                 "side_margin": args.side_margin,
+                # What the target costs, independent of any model. The economics
+                # figure draws its break-even curve from these three.
+                "target": {
+                    "resolved_share": float(touched.mean()),
+                    "captured_bps": captured_bps,
+                    "required_hit_rate": needed,
+                },
             },
             "folds": fold_results,
             "pooled": [{k: v for k, v in r.items()} for r in rows],

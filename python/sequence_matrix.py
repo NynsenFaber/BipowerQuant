@@ -30,21 +30,48 @@ from data_feeder import CSV_SCHEMA
 
 # --- Problem definition ------------------------------------------------------
 
-# Half-width of the horizontal barriers, as a simple return. 5 bp is roughly one
-# taker round-trip on Binance spot, so a position that touches the upper barrier
-# before the lower one covers its own costs.
-BARRIER = 0.0005
+# Half-width of the horizontal barriers, as a simple return, and the deadline the
+# side must be decided by. These two are ONE choice, not two, and they were picked
+# together by `sweep_barriers.py --geometry-only` on the training months alone.
+#
+# The criterion is the hit rate a side model must reach to break even,
+#
+#     h* = 1/2 (1 + c / (rho * G))
+#
+# where `c` is the round trip, `rho` the share of positions that reach a
+# horizontal barrier rather than timing out, and `G` the magnitude captured when
+# one is reached. See `backtest.required_hit_rate` for why the more familiar
+# `B(2h-1) - c` is wrong and how badly.
+#
+# The project ran for a long time at 5 bp / 60 s, chosen because 5 bp is two taker
+# fees. That target needed h* = 1.42 — literally unreachable — and the reason is
+# not that 5 bp sat below its 6 bp round trip by a basis point. It is that a
+# 60-second deadline caps `rho * G` at ~2.8 bp however the barrier is set: widen
+# it and positions stop resolving as fast as the payoff grows. At 60 seconds
+# every barrier from 5 bp to 100 bp needs h* > 0.88, gate or no gate.
+#
+# 60 bp / 3600 s minimises h* over a 48-cell grid, subject to the barrier clearing
+# the round trip and at least 50 non-overlapping trades a day. Measured on
+# Jan-Mar 2026: 36.5% of windows resolve, capturing 61.9 bp when they do, for
+# h* = 0.550 on the realized-variance-gated population and 0.614 ungated.
+# 40 bp / 3600 s is within 0.015 of that and was not chosen — the rule was fixed
+# before the grid was run, and re-picking afterwards is how a target gets fitted.
+BARRIER = 0.0060
+HORIZON = 3600
 
 # Legacy alias. The original target was `forward_return > FEE_THRESHOLD`, which
 # is retained under `label_mode="fee_threshold"` so old checkpoints still score.
-FEE_THRESHOLD = BARRIER
+# Pinned at its historical 5 bp: those checkpoints were trained against that
+# number, and following `BARRIER` here would silently rescore them on a target
+# they never saw.
+FEE_THRESHOLD = 0.0005
 
 # 5-minute lookback window, in 1-second bars. This is PatchTST's sequence length L.
+# Unchanged when the horizon moved, so that the only difference between the old
+# results and the new ones is the target. That leaves the lookback short relative
+# to the deadline (1:12); `sweep_barriers.py --window 900` is the experiment that
+# asks whether it matters, and §5 of the README reports what it found.
 WINDOW_SIZE = 300
-
-# 1-minute forward horizon, in 1-second bars. Under the triple-barrier method
-# this is the *vertical* barrier: the deadline by which a side must be decided.
-HORIZON = 60
 
 # pi / 2, the Bipower Variation scale factor (mirrors PI_FACTOR in math_engine.hpp).
 PI_FACTOR = 1.5707963267948966
@@ -580,6 +607,25 @@ def build_tabular_features(
     )
 
 
+def rolling_realized_variance(
+    price: np.ndarray, starts: np.ndarray, window: int = WINDOW_SIZE
+) -> np.ndarray:
+    """Column 0 of `build_tabular_features`, without building the other six.
+
+    This is the untrained gate: a rolling sum of squared 1-second log returns over
+    the lookback. `build_tabular_features` computes it as part of the seven, from
+    a shared set of cumulative sums; a caller that wants only the gate — a barrier
+    sweep scoring dozens of (barrier, horizon) cells, say — would otherwise pay
+    for a six-column channel matrix and a seven-column feature matrix to read one
+    of them. The offsets mirror that function exactly, including the `+ 1` that
+    matches the C++ loop's `i > 0` start, and a test asserts the two agree.
+    """
+    log_p = np.log(np.asarray(price, dtype=np.float64))
+    squared = np.square(np.diff(log_p, prepend=log_p[0]))
+    cumulative = np.concatenate(([0.0], np.cumsum(squared)))
+    return cumulative[starts + window] - cumulative[starts + 1]
+
+
 LABEL_MODES = ("triple_barrier", "barrier_touched", "fee_threshold")
 
 
@@ -653,11 +699,11 @@ def build_targets(
     `label_mode="triple_barrier"` (default) asks **which side gets touched
     first**: `y = 1` if the upper barrier is hit before the lower one, `y = 0` if
     the lower comes first, and `usable = False` where neither is reached inside
-    the horizon. Both classes therefore require the *same* 5 bp move, which is
-    what stops a volatility forecast from scoring on the label: magnitude is
-    constant across the two classes by construction, so only sign is left to
-    predict. The price is that ~79% of windows resolve on the vertical barrier
-    and drop out of the population.
+    the horizon. Both classes therefore require the *same* `barrier`-sized move,
+    which is what stops a volatility forecast from scoring on the label: magnitude
+    is constant across the two classes by construction, so only sign is left to
+    predict. The price is that the windows resolving on the vertical barrier drop
+    out of the population — at the current 60 bp / 3600 s target, 63% of them.
 
     `label_mode="barrier_touched"` is the **gate**: `y = 1` if *either* horizontal
     barrier is reached inside the horizon, defined on every window rather than a
@@ -666,11 +712,11 @@ def build_targets(
     that predicts *which way* is what lets the pair be evaluated on the whole
     population instead of on a subset chosen with hindsight. See `metalabel.py`.
 
-    `label_mode="fee_threshold"` is the original target, `forward_return > 5bp`.
-    It is a **compound event** — a large move happened *and* it went up — and the
-    first conjunct is far easier to forecast than the second, so a model
-    optimising it drifts into predicting volatility. Kept only so checkpoints
-    trained against it still reproduce their published numbers.
+    `label_mode="fee_threshold"` is the original target, `forward_return >
+    FEE_THRESHOLD` (5 bp). It is a **compound event** — a large move happened *and*
+    it went up — and the first conjunct is far easier to forecast than the second,
+    so a model optimising it drifts into predicting volatility. Kept only so
+    checkpoints trained against it still reproduce their published numbers.
 
     Entries within `horizon` of the end are never usable; no window returned by
     `valid_window_starts` labels against them in any case.

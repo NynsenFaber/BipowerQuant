@@ -353,6 +353,32 @@ def test_tabular_feature_count_matches_the_documented_names():
     assert len(seq.TABULAR_FEATURE_NAMES) == 7
 
 
+def test_the_standalone_gate_matches_column_zero_of_the_feature_matrix(bars):
+    """`rolling_realized_variance` is the untrained gate, duplicated for cheapness.
+
+    A barrier sweep wants only this column and would otherwise build a six-channel
+    matrix and a seven-column feature matrix to read one of them. Two copies of an
+    offset convention is exactly the kind of duplication that drifts, so the two
+    are pinned against each other here — a sweep that silently scored a *different*
+    gate than the walk-forward runs would invalidate the target selection without
+    failing anything.
+    """
+    window = 50
+    starts = np.arange(300, dtype=np.int64)
+    features = seq.build_tabular_features(
+        seq.build_channels(bars, "full"), bars["price"], starts, window
+    )
+
+    standalone = seq.rolling_realized_variance(bars["price"], starts, window)
+
+    # rtol 1e-6, not exact: the channel matrix stores squared returns as float32
+    # before they are summed, while this path keeps them in float64 throughout.
+    # That is ~1e-8 of relative disagreement and it is the more accurate of the
+    # two. An off-by-one in the window offsets would be ~1/window, four orders of
+    # magnitude clear of it, which is the drift this is here to catch.
+    np.testing.assert_allclose(standalone, features[:, 0], rtol=1e-6)
+
+
 # --- caching and splicing -----------------------------------------------------
 
 
