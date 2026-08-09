@@ -281,12 +281,34 @@ def figure_economics(data: dict, path: Path) -> None:
     plt.close(fig)
 
 
-def figure_backtest(data: dict, path: Path) -> None:
-    """Gross vs net per trade. The point is that gross is zero, not that net is bad.
+def _common_gate(rows: list[dict], models: list[str]) -> tuple[str, float] | None:
+    """The tightest gate every model shares, so the bars compare like with like.
 
-    An earlier version of this figure plotted net alone and produced a dozen
-    identical -6 bp bars, which says only that the cost is the cost. Splitting
-    gross out is what shows where the money went: nowhere, because none was made.
+    Picking each model's *own* best configuration would let every bar come from a
+    different traded population, which turns a model comparison into a comparison
+    of whichever gate happened to suit each model — and flatters the weak ones,
+    since the maximum of seven noisy numbers is not zero. The tightest shared gate
+    is the population the README quotes, and on it every model is deciding the
+    direction of the *same* trades.
+    """
+    shared = [
+        key
+        for key in {(r["gate"], r["gate_quantile"]) for r in rows}
+        if {r["model"] for r in rows if (r["gate"], r["gate_quantile"]) == key} >= set(models)
+    ]
+    if not shared:
+        return None
+    # Highest quantile = most selective; "none" (quantile 0) only if nothing else.
+    return max(shared, key=lambda k: (k[0] != "none", k[1]))
+
+
+def figure_backtest(data: dict, path: Path) -> None:
+    """Gross vs net per trade, every model on one identical traded population.
+
+    Two panels rather than one: plotted together, a gross of a few bp against a
+    net of -5 bp puts the quantity that carries the finding at sub-pixel height,
+    where it reads as missing data. Gross is the column that does not depend on
+    the cost assumptions, so it gets its own axis.
     """
     rows = [r for r in data["pooled"] if r["n_trades"] > 100]
     if not rows:
@@ -294,9 +316,12 @@ def figure_backtest(data: dict, path: Path) -> None:
     models = sorted({r["model"] for r in rows})
     cost = data["config"]["breakeven_barrier_bps"]
 
-    # One row per model: whichever gate configuration did best on net.
+    gate = _common_gate(rows, models)
+    if gate is None:
+        return
     best = {
-        m: max((r for r in rows if r["model"] == m), key=lambda r: r["net_bps"]) for m in models
+        m: next(r for r in rows if r["model"] == m and (r["gate"], r["gate_quantile"]) == gate)
+        for m in models
     }
 
     # Two panels, because the two quantities differ by three orders of magnitude:
@@ -375,9 +400,16 @@ def figure_backtest(data: dict, path: Path) -> None:
     fig.text(
         0.008,
         -0.02,
-        "Pooled out-of-sample months, one position at a time, best gate "
-        "configuration per model. Trades: "
-        + ", ".join(f"{label} {best[m]['n_trades']:,}" for label, m in zip(labels, models)),
+        "Pooled out-of-sample months, one position at a time. Every model decides the "
+        f"direction of the same {best[models[0]]['n_trades']:,} trades, selected by the "
+        + (
+            "realized-variance gate"
+            if gate[0] == "rv"
+            else "trained gate"
+            if gate[0] == "trained"
+            else "no gate"
+        )
+        + (f" at the top {(1 - gate[1]) * 100:.0f}%." if gate[0] != "none" else "."),
         fontsize=8,
         color=MUTED,
     )
