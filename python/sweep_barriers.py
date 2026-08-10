@@ -299,6 +299,13 @@ def main() -> None:
         default=[60, 300, 900],
         help="vertical barriers in seconds",
     )
+    parser.add_argument(
+        "--window-scale",
+        default=None,
+        choices=sorted(seq.WINDOW_SCALES),
+        help="named lookback; overrides --window. "
+        + ", ".join(f"{k}={v}s" for k, v in seq.WINDOW_SCALES.items()),
+    )
     parser.add_argument("--window", type=int, default=seq.WINDOW_SIZE)
     parser.add_argument(
         "--months",
@@ -337,6 +344,10 @@ def main() -> None:
     )
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
+
+    # Resolved once, onto `args`, because every cell of the sweep reads it.
+    if args.window_scale:
+        args.window = seq.window_for(args.window_scale)
 
     bars = wf.load_bars(args.bars)
     if args.months:

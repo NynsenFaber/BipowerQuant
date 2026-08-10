@@ -13,6 +13,36 @@ python eval_patchtst.py --weights ../weights/patchtst_BTCUSDT_2026-05_full.pt \
 `eval_patchtst.py` defaults to `weights/patchtst.pt`, so renaming (or symlinking) a
 checkpoint to that name lets you drop the `--weights` flag.
 
+## One set of weights per lookback
+
+The study trains the same architecture at three lookbacks, so everything here
+comes in threes. The notebook writes, per scale:
+
+| File | Contents |
+| :--- | :--- |
+| `patchtst_probs_<scale>.npz` | one out-of-sample probability array per fold, keyed by fold name |
+| `patchtst_folds_<scale>.json` | the run's metadata: chosen stride, per-fold AUC, best epoch |
+| `patchtst_<fold-slug>.pt` | one checkpoint per fold |
+
+`<scale>` is `short` (5-minute lookback), `mid` (2 hours) or `long` (24 hours).
+`patchtst_probs_short.npz` is the run the README's 5-minute results come from;
+`patchtst_probs.npz` is the same file under its pre-lookback-study name, kept so older
+commands still resolve. The `.npz` files are what the backtest consumes:
+
+```bash
+cd python
+python walkforward.py --bars ../data/bars_6m.npz --window-scale mid \
+                      --patchtst-probs ../weights/patchtst_probs_mid.npz \
+                      --out ../data/wf_mid.json
+```
+
+**The scale in the filename is not checked against the probabilities**, because
+`walkforward.py` only sees an array of numbers keyed by fold name. Scoring the
+2-hour probabilities against a 5-minute run would produce a plausible-looking
+table rather than an error, so keep the pairing straight. Each checkpoint's
+`data_meta` records its `window` and `window_scale`, which is the authoritative
+answer to what a given file was trained at.
+
 ## What is inside a checkpoint
 
 `.pt` files here are plain `torch.save` dicts — no pickled classes, so they load
@@ -60,7 +90,10 @@ given file was trained against.
 
 ## Size and version control
 
-The current configuration is ~209k parameters, so a checkpoint is roughly **0.9 MB** —
+Parameter count grows with the lookback, because the patch embedding is a
+`Linear(patch_len, d_model)` and the patch length scales with the window: **209k**
+at the short scale, **233k** at the mid, **503k** at the long. Nothing else in the
+network changes size. That puts a checkpoint between **0.9 MB and 2.1 MB** —
 small enough to commit if you want a result to stay reproducible. `.gitignore`
 excludes `weights/*.pt` by default; force-add the ones worth keeping:
 

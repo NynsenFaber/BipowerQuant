@@ -126,6 +126,13 @@ def main() -> None:
 
     parser.add_argument("--scheme", default="anchored", choices=wf.SCHEMES)
     parser.add_argument("--train-months", type=int, default=3)
+    parser.add_argument(
+        "--window-scale",
+        default=None,
+        choices=sorted(seq.WINDOW_SCALES),
+        help="named lookback; overrides --window. "
+        + ", ".join(f"{k}={v}s" for k, v in seq.WINDOW_SCALES.items()),
+    )
     parser.add_argument("--window", type=int, default=seq.WINDOW_SIZE)
     parser.add_argument("--horizon", type=int, default=seq.HORIZON)
     parser.add_argument("--barrier", type=float, default=seq.BARRIER)
@@ -147,6 +154,8 @@ def main() -> None:
     )
     parser.add_argument("--yes", action="store_true", help="skip the memory confirmation")
     args = parser.parse_args()
+
+    window = seq.window_for(args.window_scale) if args.window_scale else args.window
 
     data_dir = Path(args.data_dir)
 
@@ -218,7 +227,7 @@ def main() -> None:
             return
 
     device = torch.device(args.device) if args.device else None
-    cfg = PatchTSTConfig(n_channels=n_channels, seq_len=args.window)
+    cfg = PatchTSTConfig.for_window(window, n_channels=n_channels)
     train_cfg = TrainConfig(epochs=args.epochs, batch_size=args.batch_size)
 
     def on_fold(name: str, probs: np.ndarray) -> None:
@@ -234,7 +243,7 @@ def main() -> None:
     _, run_meta = pf.train_folds(
         bars,
         folds,
-        window=args.window,
+        window=window,
         horizon=args.horizon,
         barrier=args.barrier,
         channel_set=args.channels,

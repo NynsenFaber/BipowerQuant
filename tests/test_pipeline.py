@@ -103,6 +103,88 @@ def test_the_two_feature_paths_agree(bars):
     np.testing.assert_allclose(X_cpp[:, 4], X_py[:, 4], rtol=1e-9)
 
 
+# --- which summation path a lookback takes ------------------------------------
+
+
+def test_narrow_windows_use_the_exact_engine_and_wide_ones_do_not():
+    """The C++ loop is exact but costs `n_bars * window`, so it has a ceiling.
+
+    At six months of bars it is 41 seconds at the 5-minute lookback and 3.3 hours
+    at the 24-hour one, per call. The cumulative-sum path is O(n) at any width.
+    """
+    limit = ml_matrix.CPP_WINDOW_LIMIT
+
+    assert ml_matrix.resolve_engine(limit) == "cpp"
+    assert ml_matrix.resolve_engine(limit + 1) == "numpy"
+    assert ml_matrix.resolve_engine(seq.window_for("short")) == "cpp"
+    assert ml_matrix.resolve_engine(seq.window_for("mid")) == "numpy"
+    assert ml_matrix.resolve_engine(seq.window_for("long")) == "numpy"
+
+
+def test_an_explicit_engine_overrides_the_width_rule():
+    """So a test can pin one path against the other on the same bars."""
+    assert ml_matrix.resolve_engine(seq.window_for("long"), "cpp") == "cpp"
+    assert ml_matrix.resolve_engine(50, "numpy") == "numpy"
+
+
+def test_an_unknown_engine_is_rejected():
+    with pytest.raises(ValueError, match="engine must be one of"):
+        ml_matrix.resolve_engine(50, "fortran")
+
+
+def test_the_two_engines_agree_on_the_same_windows(bars):
+    """`feature_matrix` must not change what it computes when it changes how.
+
+    The wide-lookback runs go through the NumPy path and the short one through
+    C++, so the three scales would not be comparable if the paths disagreed
+    beyond the documented cancellation error.
+    """
+    window = 50
+    starts = seq.valid_window_starts(bars["price"].size, window, 20)
+
+    X_cpp = ml_matrix.feature_matrix(bars, starts, window, engine="cpp")
+    X_py = ml_matrix.feature_matrix(bars, starts, window, engine="numpy")
+
+    assert X_cpp.shape == X_py.shape
+    np.testing.assert_allclose(X_cpp, X_py, rtol=1e-5, atol=1e-12)
+
+
+def test_a_wide_lookback_never_calls_the_quadratic_engine(bars, monkeypatch):
+    """A regression guard with real teeth: this is a 3.3-hour mistake, not a bug.
+
+    `feature_matrix` reaching for the C++ loop at the 24-hour scale would still
+    produce the right answer, which is exactly why it would survive review.
+    """
+
+    def explode(*args, **kwargs):
+        raise AssertionError("the C++ engine was called at a wide lookback")
+
+    monkeypatch.setattr(ml_matrix, "rolling_metrics", explode)
+    window = ml_matrix.CPP_WINDOW_LIMIT + 300
+    starts = seq.valid_window_starts(bars["price"].size, window, 20)
+
+    X = ml_matrix.feature_matrix(bars, starts, window)
+
+    assert X.shape == (starts.size, 7)
+    assert np.isfinite(X).all()
+
+
+def test_the_training_matrix_widens_with_the_lookback(bars):
+    """The lookback return really is the return across the whole window."""
+    for window in (50, 200):
+        X, _, starts = ml_matrix.build_training_matrix(
+            bars, window=window, horizon=20, barrier=TEST_BARRIER_SHORT
+        )
+        log_price = np.log(bars["price"])
+
+        np.testing.assert_allclose(
+            X[:, 4],
+            log_price[starts + window - 1] - log_price[starts],
+            rtol=1e-9,
+            atol=1e-12,
+        )
+
+
 # --- per-fold row selection ---------------------------------------------------
 
 

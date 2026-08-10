@@ -82,6 +82,14 @@ def main() -> None:
     parser.add_argument("--csv", default=FILE_PATH)
     parser.add_argument("--bars-cache", default=None, help="reuse/write a .npz second-bar cache")
     parser.add_argument("--hours", type=float, default=None, help="None = the whole file")
+    parser.add_argument(
+        "--window-scale",
+        default=None,
+        choices=sorted(seq.WINDOW_SCALES),
+        help="named lookback; overrides --window. "
+        + ", ".join(f"{k}={v}s" for k, v in seq.WINDOW_SCALES.items()),
+    )
+    parser.add_argument("--window", type=int, default=seq.WINDOW_SIZE)
     parser.add_argument("--label-mode", default="triple_barrier", choices=seq.LABEL_MODES)
     parser.add_argument("--n-estimators", type=int, default=100)
     parser.add_argument("--max-depth", type=int, default=4)
@@ -89,18 +97,24 @@ def main() -> None:
     parser.add_argument("--no-log", action="store_true")
     args = parser.parse_args()
 
-    print("1. Building the feature matrix ...")
+    window = seq.window_for(args.window_scale) if args.window_scale else args.window
+
+    print(f"1. Building the feature matrix at the {seq.scale_of(window)} lookback ...")
     X, y, starts, bars = build_from_csv(
-        args.csv, hours=args.hours, cache=args.bars_cache, label_mode=args.label_mode
+        args.csv,
+        hours=args.hours,
+        cache=args.bars_cache,
+        label_mode=args.label_mode,
+        window=window,
     )
-    n_windows = seq.valid_window_starts(bars["price"].size).size
+    n_windows = seq.valid_window_starts(bars["price"].size, window).size
     print(
         f"   {X.shape[0]:,} of {n_windows:,} windows resolved by a barrier "
         f"({X.shape[0] / n_windows:.1%}) | positive rate {y.mean():.2%}"
     )
 
     print("2. Splitting chronologically, purging the boundaries ...")
-    masks = purged_split(starts, n_windows)
+    masks = purged_split(starts, n_windows, window=window)
     X_train, y_train = X[masks["train"]], y[masks["train"]]
     X_test, y_test = X[masks["test"]], y[masks["test"]]
     print(
@@ -143,7 +157,8 @@ def main() -> None:
     recall = recall_score(y_test, y_pred, zero_division=0)
     roc_auc = roc_auc_score(y_test, y_prob)
 
-    ci = seq.block_bootstrap_auc(y_test, y_prob)
+    # Blocks as long as one window's correlation reach, at this lookback.
+    ci = seq.block_bootstrap_auc(y_test, y_prob, block=window + seq.HORIZON)
 
     print("\n✅ XGBoost evaluated")
     print("=========================================")
@@ -174,6 +189,7 @@ def main() -> None:
             f"{name}: {imp:.4f}" for name, imp in zip(FEATURE_NAMES, importances)
         )
         extra = (
+            f"Lookback: {seq.scale_of(window)} ({window}s) | "
             f"Label: {args.label_mode} at +/-{seq.BARRIER:.4%} over {seq.HORIZON}s | "
             f"Positive rate (train): {n_pos / len(y_train):.2%} | "
             f"scale_pos_weight: {imbalance_ratio:.3f}\n"
@@ -183,7 +199,13 @@ def main() -> None:
             f"Test windows: {len(y_test):,}\n"
             f"Feature Importances:\n{importances_str}"
         )
-        log_results("XGBoost (7-feature matrix, triple barrier)", acc, f1, roc_auc, extra)
+        log_results(
+            f"XGBoost (7-feature matrix, triple barrier, {seq.scale_of(window)} lookback)",
+            acc,
+            f1,
+            roc_auc,
+            extra,
+        )
         print(f"\nAppended to {LOG_PATH}")
 
 

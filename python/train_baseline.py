@@ -42,16 +42,30 @@ def main() -> None:
     parser.add_argument("--csv", default=FILE_PATH)
     parser.add_argument("--bars-cache", default=None, help="reuse/write a .npz second-bar cache")
     parser.add_argument("--hours", type=float, default=None, help="None = the whole file")
+    parser.add_argument(
+        "--window-scale",
+        default=None,
+        choices=sorted(seq.WINDOW_SCALES),
+        help="named lookback; overrides --window. "
+        + ", ".join(f"{k}={v}s" for k, v in seq.WINDOW_SCALES.items()),
+    )
+    parser.add_argument("--window", type=int, default=seq.WINDOW_SIZE)
     parser.add_argument("--label-mode", default="triple_barrier", choices=seq.LABEL_MODES)
     parser.add_argument("--all-features", action="store_true", help="use all 7, not just OFI")
     parser.add_argument("--no-log", action="store_true")
     args = parser.parse_args()
 
-    print("1. Building the feature matrix ...")
+    window = seq.window_for(args.window_scale) if args.window_scale else args.window
+
+    print(f"1. Building the feature matrix at the {seq.scale_of(window)} lookback ...")
     X_full, y, starts, bars = build_from_csv(
-        args.csv, hours=args.hours, cache=args.bars_cache, label_mode=args.label_mode
+        args.csv,
+        hours=args.hours,
+        cache=args.bars_cache,
+        label_mode=args.label_mode,
+        window=window,
     )
-    n_windows = seq.valid_window_starts(bars["price"].size).size
+    n_windows = seq.valid_window_starts(bars["price"].size, window).size
 
     if args.all_features:
         X, description = X_full, f"all {X_full.shape[1]} features"
@@ -60,7 +74,7 @@ def main() -> None:
     print(f"   {X.shape[0]:,} windows | {description} | positive rate {y.mean():.2%}")
 
     print("2. Splitting chronologically, purging the boundaries ...")
-    masks = purged_split(starts, n_windows)
+    masks = purged_split(starts, n_windows, window=window)
     X_train, y_train = X[masks["train"]], y[masks["train"]]
     X_test, y_test = X[masks["test"]], y[masks["test"]]
     print(f"   train {len(y_train):,} | test {len(y_test):,}")
@@ -85,7 +99,8 @@ def main() -> None:
     recall = recall_score(y_test, y_pred, zero_division=0)
     roc_auc = roc_auc_score(y_test, y_prob)
 
-    ci = seq.block_bootstrap_auc(y_test, y_prob)
+    # Blocks as long as one window's correlation reach, at this lookback.
+    ci = seq.block_bootstrap_auc(y_test, y_prob, block=window + seq.HORIZON)
 
     print("\n✅ Logistic Regression evaluated")
     print("=========================================")
@@ -101,14 +116,21 @@ def main() -> None:
 
     if not args.no_log:
         extra = (
-            f"Input: {description} | Label: {args.label_mode} at "
+            f"Input: {description} | Lookback: {seq.scale_of(window)} ({window}s) | "
+            f"Label: {args.label_mode} at "
             f"+/-{seq.BARRIER:.4%} over {seq.HORIZON}s\n"
             f"ROC-AUC 95% CI: [{ci['lo']:.4f}, {ci['hi']:.4f}] | "
             f"P(AUC <= 0.5) = {ci['p_le_half']:.3f}\n"
             f"Precision: {precision:.4f} | Recall: {recall:.4f} | "
             f"Test windows: {len(y_test):,}"
         )
-        log_results(f"Logistic Regression ({description}, triple barrier)", acc, f1, roc_auc, extra)
+        log_results(
+            f"Logistic Regression ({description}, triple barrier, {seq.scale_of(window)} lookback)",
+            acc,
+            f1,
+            roc_auc,
+            extra,
+        )
         print(f"\nAppended to {Path(__file__).with_name('training_logs.txt')}")
 
 

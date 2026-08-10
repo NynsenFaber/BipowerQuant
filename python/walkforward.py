@@ -500,6 +500,13 @@ def main() -> None:
     )
     parser.add_argument("--barrier", type=float, default=seq.BARRIER)
     parser.add_argument("--horizon", type=int, default=seq.HORIZON)
+    parser.add_argument(
+        "--window-scale",
+        default=None,
+        choices=sorted(seq.WINDOW_SCALES),
+        help="named lookback; overrides --window. "
+        + ", ".join(f"{k}={v}s" for k, v in seq.WINDOW_SCALES.items()),
+    )
     parser.add_argument("--window", type=int, default=seq.WINDOW_SIZE)
     parser.add_argument("--taker-fee-bps", type=float, default=2.5)
     parser.add_argument("--maker-fee-bps", type=float, default=0.0)
@@ -530,20 +537,25 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="write the full result as JSON")
     args = parser.parse_args()
 
+    # The lookback is the one thing this study varies; the target, the folds and
+    # the execution model are identical across the three scales.
+    window = seq.window_for(args.window_scale) if args.window_scale else args.window
+    scale = seq.scale_of(window)
+
     print(f"1. Loading {len(args.bars)} bar cache(s) ...")
     bars = load_bars(args.bars)
     meta = bars["meta"]
     print(f"   {meta['n_bars']:,} bars | {meta.get('source', '?')}")
 
-    print("2. Building features and labels ...")
+    print(f"2. Building features and labels at the {scale} lookback ({window}s) ...")
     full_channels = seq.build_channels(bars, "full")
-    starts = seq.valid_window_starts(bars["price"].size, args.window, args.horizon)
-    X = seq.build_tabular_features(full_channels, bars["price"], starts, args.window)
+    starts = seq.valid_window_starts(bars["price"].size, window, args.horizon)
+    X = seq.build_tabular_features(full_channels, bars["price"], starts, window)
     del full_channels  # ~750 MB at six months; the features are all we need now
 
     precomputed = bt.barrier_arrays(bars["price"], args.horizon, args.barrier)
     side, exit_offset, defined = precomputed
-    label_bar = starts + args.window - 1
+    label_bar = starts + window - 1
     y_side = (side[label_bar] > 0).astype(np.int8)
     touched = ((side[label_bar] != 0) & defined[label_bar]).astype(np.int8)
     print(f"   {starts.size:,} windows | barrier touched in {touched.mean():.2%}")
@@ -594,7 +606,7 @@ def main() -> None:
         f"  ->  {'reachable' if needed < 0.65 else 'NOT REACHABLE by any model'}"
     )
 
-    purge = args.window + args.horizon - 1
+    purge = window + args.horizon - 1
     all_rows, fold_results = [], []
     for fold in folds:
         print(f"\n4. Fold {fold.name}")
@@ -605,7 +617,7 @@ def main() -> None:
             starts,
             y_side,
             touched,
-            args.window,
+            window,
             args.horizon,
             args.barrier,
             purge,
@@ -622,7 +634,7 @@ def main() -> None:
         all_rows += backtest_fold(
             bars,
             result,
-            args.window,
+            window,
             args.horizon,
             args.barrier,
             costs,
@@ -664,16 +676,21 @@ def main() -> None:
     print("hit|res = the same, over trades that reached a horizontal barrier at all")
     print("          (the second is what B(2h-1) > c is about)")
 
-    # A model missing from some folds is pooled over fewer months than the rest,
-    # which makes its row quietly incomparable — say so rather than let it sit in
-    # the same table looking equivalent.
-    partial = {r["model"] for r in rows if r["n_folds"] < len(folds)}
-    for model in sorted(partial):
-        covered = max(r["n_folds"] for r in rows if r["model"] == model)
-        print(
-            f"\n!  {model} is pooled over {covered} of {len(folds)} folds — its row is not "
-            "comparable to the others."
-        )
+    # A configuration that produced no trades in some fold is pooled over fewer
+    # months than the rest, which makes that row quietly incomparable — say so
+    # rather than let it sit in the same table looking equivalent. A tight gate at
+    # a long lookback is where this bites: the gate's own scores are persistent,
+    # so the windows it admits clump into a handful of days instead of spreading
+    # across the quarter, and a fold can contribute nothing at all.
+    thin = [r for r in rows if r["n_folds"] < len(folds)]
+    if thin:
+        print(f"\n!  {len(thin)} row(s) do not cover all {len(folds)} folds:")
+        for r in sorted(thin, key=lambda r: (r["gate"], r["gate_quantile"], r["model"])):
+            gate = r["gate"] if r["gate"] == "none" else f"{r['gate']}@{r['gate_quantile']:g}"
+            print(
+                f"     {r['model']:<26} {gate:<12} {r['n_folds']} of {len(folds)} folds, "
+                f"{r['n_days']} trading day(s) — not comparable to the rest of the table"
+            )
 
     if args.out:
         payload = {
@@ -683,7 +700,8 @@ def main() -> None:
                 "train_months": args.train_months,
                 "barrier_bps": args.barrier / bt.BPS,
                 "horizon": args.horizon,
-                "window": args.window,
+                "window": window,
+                "window_scale": scale,
                 "costs": asdict(costs),
                 "execution": asdict(execution),
                 "breakeven_barrier_bps": breakeven,

@@ -24,6 +24,7 @@ against it would be checking a market rather than a function.
 | `test_walkforward.py` | folds and pooling | calendar edges a six-month sample never hits |
 | `test_patchtst.py` | model, batching, checkpoints | tiny configs; wiring, not results |
 | `test_pipeline.py` | `ml_matrix`, fold rows, stride budget | where the purge actually happens |
+| `test_window_scales.py` | the short/mid/long lookbacks | the equal-capacity property the comparison rests on |
 | `test_integration.py` | `train_folds`, `run_fold` end to end | all `slow`; the only tests of how the pieces connect |
 
 ## Two things worth knowing before adding a test
@@ -61,3 +62,14 @@ and those are the ones to keep working if the code moves under them:
   was documented and passed by `train_patchtst_local.py` but not accepted by
   `train_folds`, which passed every unit test and still killed the run at the
   first fold boundary. Integration tests exist for that class of failure.
+* **The three lookbacks are the same model.** Every scale patches to 37 tokens
+  and every parameter except the patch embedding has an identical shape, so a
+  difference between the runs is attributable to how much history each read. A
+  24-hour model patched at the 5-minute geometry would be a 10,800-token
+  Transformer — it would train, it would score, and the comparison would be
+  meaningless without anything failing.
+* **A longer lookback discards nothing.** Patching an index ramp and checking
+  every index survives. The cheap way to afford a 24-hour window is a coarser bar
+  grid, which would make the long model blind to exactly the intra-minute ordering
+  the short model's edge comes from — and would leave "more history did not help"
+  unable to be told apart from "less resolution hurt".

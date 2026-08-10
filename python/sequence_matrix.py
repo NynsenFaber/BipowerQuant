@@ -66,12 +66,61 @@ HORIZON = 3600
 # they never saw.
 FEE_THRESHOLD = 0.0005
 
-# 5-minute lookback window, in 1-second bars. This is PatchTST's sequence length L.
-# Unchanged when the horizon moved, so that the only difference between the old
-# results and the new ones is the target. That leaves the lookback short relative
-# to the deadline (1:12); `sweep_barriers.py --window 900` is the experiment that
-# asks whether it matters, and §5 of the README reports what it found.
-WINDOW_SIZE = 300
+# How much history a model reads before deciding, in 1-second bars. This is
+# PatchTST's sequence length L, and the width of the rolling sums the tabular
+# features are built from.
+#
+# The project ran for a long time at 300 seconds alone, which is short against an
+# hour-long deadline (1:12) — the decision is made from five minutes of tape and
+# then lives or dies over the next sixty. These three scales are the experiment
+# that asks whether that ratio was the binding constraint. The target does not
+# move: same 60 bp barriers, same 3600-second deadline, same labels, same folds.
+# **Only the lookback changes.**
+#
+#     short   300 s   5 minutes   1:12 against the deadline
+#     mid    7200 s   2 hours     2:1
+#     long  86400 s   24 hours    24:1
+#
+# The two long scales are exact multiples of the short one (x24 and x288), and
+# that is load-bearing rather than tidy: `PatchTSTConfig.for_window` scales the
+# patch length and patch stride by the same factor, which holds the token count —
+# and therefore the attention cost and the head width — constant across all
+# three. Without the exact multiple the three models would differ in capacity as
+# well as in lookback, and the comparison would not isolate anything.
+WINDOW_SCALES = {
+    "short": 300,
+    "mid": 7200,
+    "long": 86400,
+}
+DEFAULT_SCALE = "short"
+
+# The default everything still falls back to, so a caller that never heard of the
+# scales gets the original 5-minute behaviour unchanged.
+WINDOW_SIZE = WINDOW_SCALES[DEFAULT_SCALE]
+
+
+def window_for(scale: str) -> int:
+    """Lookback length in bars for a named scale ("short" / "mid" / "long")."""
+    try:
+        return WINDOW_SCALES[scale]
+    except KeyError:
+        raise ValueError(
+            f"Unknown window scale {scale!r}; known: {', '.join(WINDOW_SCALES)}"
+        ) from None
+
+
+def scale_of(window: int) -> str:
+    """Reverse lookup, for labelling an output file or a figure.
+
+    Returns e.g. `"1800s"` for a window that is not one of the three named
+    scales, so a one-off `--window` still produces a distinguishable name rather
+    than colliding with a named run.
+    """
+    for name, size in WINDOW_SCALES.items():
+        if size == window:
+            return name
+    return f"{window}s"
+
 
 # pi / 2, the Bipower Variation scale factor (mirrors PI_FACTOR in math_engine.hpp).
 PI_FACTOR = 1.5707963267948966
@@ -85,7 +134,7 @@ TABULAR_FEATURE_NAMES = [
     "Bipower Variation",
     "Jumps",
     "Order Flow Imbalance",
-    "5m Return",
+    "Lookback Return",
     "Vol-Adjusted OFI",
     "Signed Jumps",
 ]
@@ -578,9 +627,11 @@ def build_tabular_features(
     jumps = np.maximum(realized_variance - bipower, 0.0)
 
     log_price = np.log(price)
-    return_5m = log_price[starts + window - 1] - log_price[starts]
+    # Named for what it is rather than for how long it happens to be: at the
+    # short scale this is the 5-minute return, at the long one a full day's.
+    lookback_return = log_price[starts + window - 1] - log_price[starts]
     vol_adjusted_ofi = order_flow / (np.sqrt(bipower) + EPSILON)
-    signed_jumps = jumps * np.sign(return_5m)
+    signed_jumps = jumps * np.sign(lookback_return)
 
     # float64, unlike the channel matrix: these columns span ~20 orders of
     # magnitude (RV is ~1e-7, OFI is ~1e2) and feed trees rather than a network,
@@ -600,7 +651,7 @@ def build_tabular_features(
             bipower,
             jumps,
             order_flow,
-            return_5m,
+            lookback_return,
             vol_adjusted_ofi,
             signed_jumps,
         )
@@ -923,22 +974,31 @@ def block_bootstrap_auc(
     y_true: np.ndarray,
     score: np.ndarray,
     n_boot: int = 400,
-    block: int = WINDOW_SIZE + HORIZON,
+    block: int | None = None,
     seed: int = 7,
 ) -> dict:
     """Moving-block bootstrap confidence interval for ROC-AUC.
 
     An i.i.d. bootstrap is wrong here and flatteringly so. Consecutive windows
-    share 299 of their 300 bars and their labels are driven by overlapping
-    forward paths, so resampling single windows treats ~360 correlated
-    observations as 360 independent ones and returns an interval several times
-    too narrow. Resampling contiguous blocks of `window + horizon` windows keeps
-    each block internally intact, so the interval reflects the number of
-    genuinely independent episodes in the split rather than its row count.
+    share all but one of their bars and their labels are driven by overlapping
+    forward paths, so resampling single windows treats correlated observations as
+    independent ones and returns an interval several times too narrow. Resampling
+    contiguous blocks of `window + horizon` windows keeps each block internally
+    intact, so the interval reflects the number of genuinely independent episodes
+    in the split rather than its row count.
+
+    **`block` must match the lookback the scores came from.** It defaults to the
+    short lookback's `WINDOW_SIZE + HORIZON`, because that is what this project
+    ran at for most of its life — but a caller scoring the 2-hour or 24-hour
+    models and leaving it there would be claiming 3,899-window independence for
+    windows that overlap for 90,000, and the interval would come out far too
+    narrow in the flattering direction. Every caller here passes its own.
 
     Returns the interval plus `p_le_half`, the share of resamples at or below
     0.5 — the number to read when asking whether an edge exists at all.
     """
+    if block is None:
+        block = WINDOW_SIZE + HORIZON
     y_true = np.asarray(y_true)
     score = np.asarray(score)
     n = y_true.size

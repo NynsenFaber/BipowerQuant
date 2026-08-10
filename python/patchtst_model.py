@@ -58,6 +58,26 @@ import torch.nn.functional as F
 
 CHECKPOINT_FORMAT = 1
 
+# The lookback the patch geometry is defined against, in bars. Every other scale
+# is a whole multiple of it; see `PatchTSTConfig.for_window`. Duplicated from
+# `sequence_matrix.WINDOW_SCALES["short"]` rather than imported, because this
+# module deliberately depends on nothing but numpy and torch — it is the half of
+# the pipeline that has to import inside a Colab runtime with no Polars and no
+# compiled extension.
+BASE_WINDOW = 300
+
+# How many float32 elements of the patched tensor `(B, M, N, P)` one batch may
+# hold. The patched tensor is the largest thing a forward pass allocates and
+# autograd keeps it alive for the embedding's backward, so it — not the model —
+# is what sets the batch size, and it grows with P, i.e. with the window.
+#
+# 48 M elements is ~190 MB in float32, which leaves a 16 GB T4 room for the
+# gather, the normalised copy and the encoder activations on top. It caps nothing
+# at the short and mid scales (they permit 40,000 and 1,600 windows a batch
+# respectively) and pulls the long scale down to 128, which is where a 4,608-bar
+# patch has to sit.
+PATCH_TENSOR_BUDGET = 48_000_000
+
 
 # --- Configuration -----------------------------------------------------------
 
@@ -107,6 +127,78 @@ class PatchTSTConfig:
     def from_dict(cls, payload: dict) -> PatchTSTConfig:
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in payload.items() if k in known})
+
+    @classmethod
+    def for_window(
+        cls,
+        window: int,
+        n_channels: int = 2,
+        base_window: int = BASE_WINDOW,
+        base_patch_len: int = 16,
+        base_stride: int = 8,
+        **overrides,
+    ) -> PatchTSTConfig:
+        """The config for a lookback of `window` bars, at constant token count.
+
+        The study compares the same architecture reading 5 minutes, 2 hours and
+        24 hours of tape. Patching naively — keeping P=16, S=8 and letting N grow
+        with the window — would make those three *different models*: N goes from
+        37 tokens to 10,800, attention cost grows with N^2, and the head, whose
+        input is `M x N x d_model`, grows with it. A 24-hour model that did worse
+        would be uninterpretable, because it would differ in capacity, in
+        regularisation and in compute all at once.
+
+        So the patch length and the patch stride scale with the window instead:
+
+            P = 16 k,  S = 8 k    for  k = window / 300
+
+        which holds N at 37 for every k, since
+        `(300k - 16k) // 8k + 2 = 284 // 8 + 2`. The encoder, the head and the
+        attention cost are then **identical** across the three scales, and the
+        only thing that changes is how many seconds of tape each of the 37 tokens
+        summarises: 16 at the short scale, 384 at the mid, 4,608 at the long.
+
+        Nothing is discarded to achieve that. Every one of the 86,400 seconds
+        still reaches the network; the patch embedding is simply a wider linear
+        map (4,608 -> 64 rather than 16 -> 64), and it learns its own aggregation
+        of the seconds inside a patch rather than being handed a fixed one. The
+        information sets are strictly nested — the long model sees everything the
+        short model sees, plus a day of context — which is what makes "does more
+        history help?" a question the comparison can actually answer.
+
+        `window` must be a whole multiple of `base_window`; anything else lands
+        on a different N and quietly breaks the equal-capacity property.
+        """
+        if window % base_window:
+            raise ValueError(
+                f"window {window} is not a multiple of the base window {base_window}; "
+                "the patch geometry only holds the token count constant at whole "
+                f"multiples (try {round(window / base_window) * base_window})"
+            )
+        k = window // base_window
+        return cls(
+            n_channels=n_channels,
+            seq_len=window,
+            patch_len=base_patch_len * k,
+            stride=base_stride * k,
+            **overrides,
+        )
+
+
+def batch_size_for(cfg: PatchTSTConfig, base: int = 512, floor: int = 32) -> int:
+    """`base`, or the largest power-of-two batch the patched tensor can afford.
+
+    Holds `B x M x N x P` under `PATCH_TENSOR_BUDGET` — see that constant for why
+    that product is the binding allocation. `base` is returned untouched whenever
+    it fits, so the short and mid scales keep whatever batch size the caller
+    chose and only the long scale, where a patch is 4,608 bars wide, is pulled
+    down. Rounded to a power of two when it does bind.
+    """
+    per_window = cfg.n_channels * cfg.num_patches * cfg.patch_len
+    allowed = max(PATCH_TENSOR_BUDGET // max(per_window, 1), 1)
+    if base <= allowed:
+        return base
+    return max(floor, 1 << (allowed.bit_length() - 1))
 
 
 # --- Building blocks ---------------------------------------------------------

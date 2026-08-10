@@ -23,6 +23,7 @@ from conftest import TEST_BARRIER, TEST_HORIZON
 
 import backtest as bt
 import patchtst_folds as pf
+import patchtst_model
 import sequence_matrix as seq
 import walkforward as wf
 from patchtst_model import PatchTSTConfig
@@ -234,6 +235,109 @@ def test_a_time_budget_picks_a_stride_from_a_measured_probe(fold_bars):
 
     assert meta["train_stride"] >= 2
     assert np.isfinite(meta["projected_hours"])
+
+
+# --- the fold loop at another lookback ----------------------------------------
+
+# Two base windows (600 s), so the patch geometry `PatchTSTConfig.for_window`
+# derives is the real one — patch 32, stride 16, the same 37 tokens the study's
+# three scales all produce — rather than the hand-picked tiny geometry above. The
+# encoder is still shrunk, because what is under test is the loop, not the model.
+WIDE_WINDOW = 2 * seq.WINDOW_SCALES["short"]
+
+
+def wide_model_config() -> PatchTSTConfig:
+    return PatchTSTConfig.for_window(
+        WIDE_WINDOW, n_channels=2, d_model=16, n_heads=2, n_layers=1, d_ff=32
+    )
+
+
+def test_the_fold_loop_runs_at_a_lookback_it_was_not_written_for(fold_bars):
+    """Nothing in `train_folds` is pinned to the 5-minute window.
+
+    The whole study rests on running this loop unchanged at three lookbacks, so a
+    hardcoded 300 anywhere in it would not be a bug in one run — it would silently
+    make two of the three runs describe the wrong window.
+    """
+    cfg = wide_model_config()
+    assert (cfg.patch_len, cfg.stride, cfg.num_patches) == (32, 16, 37)
+
+    folds = two_folds()
+    probabilities, meta = pf.train_folds(
+        fold_bars,
+        folds,
+        window=WIDE_WINDOW,
+        horizon=HORIZON,
+        barrier=BARRIER,
+        config=cfg,
+        train_config=tiny_train_config(),
+        train_stride=4,
+        val_stride=4,
+        device=torch.device("cpu"),
+        verbose=False,
+    )
+
+    starts = seq.valid_window_starts(fold_bars["price"].size, WIDE_WINDOW, HORIZON)
+    for fold in folds:
+        n_test = int(((starts >= fold.test_lo) & (starts < fold.test_hi)).sum())
+        assert probabilities[fold.name].shape == (n_test,)
+
+    assert meta["window"] == WIDE_WINDOW
+    assert meta["window_scale"] == f"{WIDE_WINDOW}s"
+
+
+def test_a_config_that_disagrees_with_the_window_is_refused(fold_bars):
+    """The batcher gathers `window` bars; the model patches `seq_len` of them.
+
+    A mismatch is not an error anywhere downstream — it is a model reading a
+    window of the wrong length and scoring perfectly plausible probabilities from
+    it. So it is refused at the door.
+    """
+    with pytest.raises(ValueError, match="seq_len"):
+        pf.train_folds(
+            fold_bars,
+            two_folds()[:1],
+            window=WIDE_WINDOW,
+            horizon=HORIZON,
+            barrier=BARRIER,
+            config=tiny_model_config(),  # seq_len = 32, not 600
+            train_config=tiny_train_config(),
+            train_stride=4,
+            device=torch.device("cpu"),
+            verbose=False,
+        )
+
+
+def test_an_unaffordable_batch_is_clamped_before_the_run_starts(fold_bars, monkeypatch):
+    """Discovering this as an OOM twenty minutes into a fold is the failure mode.
+
+    The patched tensor grows with the patch length, so the batch size the project
+    has always used is 288x more memory at the 24-hour lookback than at the
+    5-minute one. The budget is squeezed here rather than building a fixture with
+    a day of bars in it.
+    """
+    cfg = wide_model_config()
+    per_window = cfg.n_channels * cfg.num_patches * cfg.patch_len
+    monkeypatch.setattr(patchtst_model, "PATCH_TENSOR_BUDGET", per_window * 40)
+
+    _, meta = pf.train_folds(
+        fold_bars,
+        two_folds()[:1],
+        window=WIDE_WINDOW,
+        horizon=HORIZON,
+        barrier=BARRIER,
+        config=cfg,
+        train_config=tiny_train_config(),  # asks for 64
+        train_stride=4,
+        val_stride=4,
+        device=torch.device("cpu"),
+        verbose=False,
+    )
+
+    # Asked for 64 and 128; the budget allows 40, and the clamp rounds down to a
+    # power of two so two runs at different budgets stay comparable.
+    assert meta["train_config"]["batch_size"] == 32
+    assert meta["train_config"]["eval_batch_size"] == 32
 
 
 # --- the walk-forward loop ----------------------------------------------------

@@ -1,0 +1,213 @@
+=== SHORT Mon Aug 10 22:32:09 CEST 2026 ===
+1. Loading 1 bar cache(s) ...
+   15,638,400 bars | BTCUSDT-trades-2026-01.csv + BTCUSDT-trades-2026-02.csv + BTCUSDT-trades-2026-03.csv + BTCUSDT-trades-2026-04.csv + BTCUSDT-trades-2026-05.csv + BTCUSDT-trades-2026-06.csv
+2. Building features and labels at the short lookback (300s) ...
+   15,634,501 windows | barrier touched in 30.09%
+3. 3 anchored fold(s):
+   2026-01..2026-03 -> 2026-04
+   2026-01..2026-04 -> 2026-05
+   2026-01..2026-05 -> 2026-06
+   PatchTST probabilities supplied for: 2026-01..2026-03 -> 2026-04, 2026-01..2026-04 -> 2026-05, 2026-01..2026-05 -> 2026-06
+   Roll half-spread estimate: 0.0007 bp
+   round trip 5.15 bp vs barrier 60.00 bp  ->  oracle can profit
+   resolves 30.1% of windows, capturing 61.87 bp when it does
+   => the side model needs a 63.8% hit rate to break even  ->  reachable
+
+4. Fold 2026-01..2026-03 -> 2026-04
+   train 1,554,421 | test 2,592,000
+   gate AUC  trained 0.7184 | RV 0.7143 | touch rate 21.71%
+   side AUC  Logistic Regression (OFI)  0.5013
+   side AUC  Logistic Regression (7f)   0.5166
+   side AUC  XGBoost                    0.5060
+   side AUC  PatchTST                   0.5256
+
+4. Fold 2026-01..2026-04 -> 2026-05
+   train 2,072,821 | test 2,678,400
+   gate AUC  trained 0.7079 | RV 0.7077 | touch rate 13.64%
+   side AUC  Logistic Regression (OFI)  0.5201
+   side AUC  Logistic Regression (7f)   0.5320
+   side AUC  XGBoost                    0.5434
+   side AUC  PatchTST                   0.5244
+
+4. Fold 2026-01..2026-05 -> 2026-06
+   train 2,608,501 | test 2,588,101
+   gate AUC  trained 0.7561 | RV 0.7509 | touch rate 36.19%
+   side AUC  Logistic Regression (OFI)  0.5021
+   side AUC  Logistic Regression (7f)   0.5244
+   side AUC  XGBoost                    0.5035
+   side AUC  PatchTST                   0.5117
+
+5. Pooled out-of-sample backtest
+model                      gate           keep    trades     hit  hit|res    gross      net   Sharpe             95% CI
+-----------------------------------------------------------------------------------------------------------------------
+PatchTST                   rv@0.9         5.3%       785  36.31%   54.29%    2.879   -2.275    -2.67      [-7.29, 1.42]
+XGBoost                    trained@0.9    5.4%       803  34.62%   51.87%    1.793   -3.361    -3.71      [-7.12, 0.18]
+Logistic Regression (7f)   rv@0.9         5.3%       785  33.76%   50.48%   -0.280   -5.433    -3.86     [-7.27, -0.37]
+PatchTST                   trained@0.9    5.4%       803  34.50%   51.68%    1.479   -3.674    -4.33     [-8.81, -0.56]
+PatchTST                   trained@0.8   11.8%     1,212  30.61%   54.24%    2.409   -2.745    -4.76     [-9.31, -0.58]
+Logistic Regression (7f)   trained@0.9    5.4%       803  33.62%   50.37%   -0.412   -5.565    -5.07     [-8.51, -1.61]
+PatchTST                   rv@0.8        11.8%     1,232  30.60%   53.93%    1.814   -3.339    -5.13     [-9.28, -1.14]
+Logistic Regression (OFI)  trained@0.9    5.4%       803  34.50%   51.68%    0.319   -4.834    -5.88    [-10.02, -1.95]
+Logistic Regression (OFI)  trained@0.8   11.8%     1,212  30.69%   54.39%    1.537   -3.616    -6.19    [-10.02, -2.21]
+Logistic Regression (7f)   trained@0.8   11.8%     1,212  29.70%   52.63%    0.886   -4.268    -6.34    [-10.11, -3.04]
+XGBoost                    rv@0.9         5.3%       785  33.12%   49.52%   -0.081   -5.234    -6.92    [-10.02, -4.08]
+Logistic Regression (OFI)  rv@0.8        11.8%     1,232  29.46%   51.93%    0.076   -5.077    -7.61    [-10.62, -4.49]
+Logistic Regression (7f)   rv@0.8        11.8%     1,232  28.08%   49.50%   -1.213   -6.367    -7.85    [-10.85, -5.43]
+Logistic Regression (OFI)  rv@0.9         5.3%       785  33.38%   49.90%   -1.643   -6.796    -7.91    [-12.42, -4.17]
+XGBoost                    trained@0.8   11.8%     1,212  28.38%   50.29%   -0.808   -5.961    -8.31    [-11.67, -5.22]
+XGBoost                    rv@0.8        11.8%     1,232  28.73%   50.64%   -0.526   -5.679    -9.32    [-13.05, -5.97]
+PatchTST                   rv@0.5        35.6%     2,018  21.41%   51.99%    0.915   -4.238    -9.36    [-13.16, -5.77]
+PatchTST                   trained@0.5   36.0%     2,058  21.23%   52.52%    0.658   -4.496    -9.40    [-13.61, -5.66]
+XGBoost                    trained@0.5   36.0%     2,058  20.85%   51.56%    0.360   -4.793    -9.51    [-13.46, -6.31]
+Logistic Regression (7f)   rv@0.5        35.6%     2,018  21.31%   51.74%    0.323   -4.830    -9.66    [-13.97, -6.30]
+XGBoost                    rv@0.5        35.6%     2,018  20.81%   50.54%   -0.127   -5.280    -9.70    [-13.60, -6.50]
+Logistic Regression (7f)   trained@0.5   36.0%     2,058  20.55%   50.84%    0.044   -5.109   -10.92    [-15.52, -7.31]
+PatchTST                   none         100.0%     2,680  17.28%   53.22%    1.151   -4.003   -11.12    [-15.46, -7.46]
+Logistic Regression (7f)   none         100.0%     2,680  16.46%   50.69%   -0.111   -5.265   -13.10    [-18.04, -9.50]
+XGBoost                    none         100.0%     2,680  16.49%   50.80%   -0.326   -5.479   -13.26    [-17.97, -9.50]
+Logistic Regression (OFI)  trained@0.5   36.0%     2,058  20.70%   51.20%   -0.823   -5.976   -13.64   [-18.62, -10.00]
+Logistic Regression (OFI)  rv@0.5        35.6%     2,018  21.26%   51.62%   -0.550   -5.704   -13.77   [-17.87, -10.37]
+Logistic Regression (OFI)  none         100.0%     2,680  16.42%   50.57%   -0.475   -5.629   -16.74   [-20.71, -13.48]
+
+hit     = predicted barrier touched first, over all trades
+hit|res = the same, over trades that reached a horizontal barrier at all
+          (the second is what B(2h-1) > c is about)
+
+Wrote ../data/wf_short.json
+=== MID Mon Aug 10 22:45:47 CEST 2026 ===
+1. Loading 1 bar cache(s) ...
+   15,638,400 bars | BTCUSDT-trades-2026-01.csv + BTCUSDT-trades-2026-02.csv + BTCUSDT-trades-2026-03.csv + BTCUSDT-trades-2026-04.csv + BTCUSDT-trades-2026-05.csv + BTCUSDT-trades-2026-06.csv
+2. Building features and labels at the mid lookback (7200s) ...
+   15,627,601 windows | barrier touched in 30.10%
+3. 3 anchored fold(s):
+   2026-01..2026-03 -> 2026-04
+   2026-01..2026-04 -> 2026-05
+   2026-01..2026-05 -> 2026-06
+   Roll half-spread estimate: 0.0007 bp
+   round trip 5.15 bp vs barrier 60.00 bp  ->  oracle can profit
+   resolves 30.1% of windows, capturing 61.87 bp when it does
+   => the side model needs a 63.8% hit rate to break even  ->  reachable
+
+4. Fold 2026-01..2026-03 -> 2026-04
+   train 1,553,041 | test 2,592,000
+   gate AUC  trained 0.7129 | RV 0.7242 | touch rate 21.61%
+   side AUC  Logistic Regression (OFI)  0.5169
+   side AUC  Logistic Regression (7f)   0.5332
+   side AUC  XGBoost                    0.5566
+
+4. Fold 2026-01..2026-04 -> 2026-05
+   train 2,071,441 | test 2,678,400
+   gate AUC  trained 0.6951 | RV 0.6995 | touch rate 13.70%
+   side AUC  Logistic Regression (OFI)  0.5532
+   side AUC  Logistic Regression (7f)   0.5590
+   side AUC  XGBoost                    0.5695
+
+4. Fold 2026-01..2026-05 -> 2026-06
+   train 2,607,121 | test 2,581,201
+   gate AUC  trained 0.7568 | RV 0.7620 | touch rate 36.21%
+   side AUC  Logistic Regression (OFI)  0.4832
+   side AUC  Logistic Regression (7f)   0.5439
+   side AUC  XGBoost                    0.5190
+
+5. Pooled out-of-sample backtest
+model                      gate           keep    trades     hit  hit|res    gross      net   Sharpe             95% CI
+-----------------------------------------------------------------------------------------------------------------------
+Logistic Regression (7f)   rv@0.9         4.5%       275  44.00%   53.30%    3.558   -1.596    -1.94      [-8.74, 5.93]
+Logistic Regression (7f)   rv@0.8        10.3%       510  39.22%   53.19%    2.504   -2.650    -2.67      [-7.82, 2.39]
+XGBoost                    trained@0.8   12.5%       706  35.55%   51.54%    1.783   -3.370    -2.85      [-6.44, 1.63]
+XGBoost                    rv@0.8        10.3%       510  37.45%   50.80%    1.629   -3.525    -2.86      [-6.74, 2.92]
+XGBoost                    rv@0.5        33.9%     1,220  28.93%   52.53%    1.603   -3.550    -4.39     [-8.22, -0.38]
+Logistic Regression (7f)   rv@0.5        33.9%     1,220  29.51%   53.57%    1.947   -3.206    -4.69     [-8.73, -0.97]
+XGBoost                    trained@0.5   37.9%     1,533  26.16%   53.18%    1.873   -3.281    -4.74     [-8.62, -0.97]
+Logistic Regression (OFI)  rv@0.8        10.3%       510  36.86%   50.00%   -0.333   -5.486    -4.95     [-8.91, -0.12]
+Logistic Regression (7f)   trained@0.8   12.5%       706  35.13%   50.92%    0.367   -4.786    -5.55     [-9.94, -1.06]
+Logistic Regression (7f)   trained@0.9    5.1%       377  38.73%   51.23%    0.430   -4.724    -5.60    [-11.12, -0.72]
+Logistic Regression (OFI)  trained@0.9    5.1%       377  36.34%   48.07%   -2.041   -7.194    -5.93    [-10.20, -1.45]
+XGBoost                    trained@0.9    5.1%       377  35.01%   46.32%   -2.801   -7.954    -6.02     [-9.98, -1.78]
+Logistic Regression (OFI)  rv@0.9         4.5%       275  41.09%   49.78%   -0.813   -5.966    -6.06     [-12.88, 1.28]
+XGBoost                    rv@0.9         4.5%       275  39.64%   48.02%   -1.525   -6.679    -6.18    [-10.52, -1.12]
+Logistic Regression (OFI)  trained@0.8   12.5%       706  33.00%   47.84%   -1.894   -7.047    -6.27     [-9.08, -3.18]
+Logistic Regression (7f)   trained@0.5   37.9%     1,533  26.29%   53.45%    1.162   -3.991    -6.44    [-10.46, -2.65]
+Logistic Regression (OFI)  rv@0.5        33.9%     1,220  26.31%   47.77%   -2.125   -7.278    -9.09    [-12.82, -5.44]
+XGBoost                    none         100.0%     2,678  16.73%   51.61%    0.741   -4.413    -9.44    [-14.05, -5.99]
+Logistic Regression (OFI)  trained@0.5   37.9%     1,533  24.27%   49.34%   -1.218   -6.371    -9.49    [-12.69, -6.22]
+Logistic Regression (7f)   none         100.0%     2,678  17.36%   53.57%    0.893   -4.261   -11.23    [-16.52, -7.51]
+Logistic Regression (OFI)  none         100.0%     2,678  16.09%   49.65%   -0.956   -6.109   -14.98   [-18.82, -11.72]
+
+hit     = predicted barrier touched first, over all trades
+hit|res = the same, over trades that reached a horizontal barrier at all
+          (the second is what B(2h-1) > c is about)
+
+Wrote ../data/wf_mid.json
+=== LONG Mon Aug 10 22:53:36 CEST 2026 ===
+1. Loading 1 bar cache(s) ...
+   15,638,400 bars | BTCUSDT-trades-2026-01.csv + BTCUSDT-trades-2026-02.csv + BTCUSDT-trades-2026-03.csv + BTCUSDT-trades-2026-04.csv + BTCUSDT-trades-2026-05.csv + BTCUSDT-trades-2026-06.csv
+2. Building features and labels at the long lookback (86400s) ...
+   15,548,401 windows | barrier touched in 30.25%
+3. 3 anchored fold(s):
+   2026-01..2026-03 -> 2026-04
+   2026-01..2026-04 -> 2026-05
+   2026-01..2026-05 -> 2026-06
+   Roll half-spread estimate: 0.0007 bp
+   round trip 5.15 bp vs barrier 60.00 bp  ->  oracle can profit
+   resolves 30.2% of windows, capturing 61.87 bp when it does
+   => the side model needs a 63.8% hit rate to break even  ->  reachable
+
+4. Fold 2026-01..2026-03 -> 2026-04
+   train 1,537,201 | test 2,592,000
+   gate AUC  trained 0.4983 | RV 0.6009 | touch rate 21.22%
+   side AUC  Logistic Regression (OFI)  0.4384
+   side AUC  Logistic Regression (7f)   0.4631
+   side AUC  XGBoost                    0.5142
+
+4. Fold 2026-01..2026-04 -> 2026-05
+   train 2,055,601 | test 2,678,400
+   gate AUC  trained 0.5408 | RV 0.5487 | touch rate 14.05%
+   side AUC  Logistic Regression (OFI)  0.5787
+   side AUC  Logistic Regression (7f)   0.5714
+   side AUC  XGBoost                    0.5834
+
+4. Fold 2026-01..2026-05 -> 2026-06
+   train 2,591,281 | test 2,502,001
+   gate AUC  trained 0.6975 | RV 0.6937 | touch rate 36.27%
+   side AUC  Logistic Regression (OFI)  0.4940
+   side AUC  Logistic Regression (7f)   0.5281
+   side AUC  XGBoost                    0.5077
+
+5. Pooled out-of-sample backtest
+model                      gate           keep    trades     hit  hit|res    gross      net   Sharpe             95% CI
+-----------------------------------------------------------------------------------------------------------------------
+XGBoost                    rv@0.9        12.1%       201  46.77%   56.63%    8.352    3.199    12.20                  -
+XGBoost                    rv@0.8        23.5%       328  41.77%   57.32%    8.189    3.035     6.81     [-4.48, 23.45]
+XGBoost                    trained@0.8   11.3%       513  36.65%   55.29%    4.973   -0.180    -0.33      [-7.14, 5.78]
+XGBoost                    rv@0.5        23.3%       775  31.61%   55.56%    4.172   -0.982    -2.21      [-8.71, 4.76]
+XGBoost                    trained@0.9    8.1%       304  39.80%   50.63%    1.054   -4.099    -5.07     [-11.76, 4.86]
+XGBoost                    trained@0.5   36.7%     1,275  23.14%   53.35%    2.108   -3.046    -5.50     [-9.67, -1.43]
+Logistic Regression (OFI)  trained@0.9    8.1%       304  41.78%   53.14%    2.330   -2.824    -7.32     [-18.58, 1.10]
+Logistic Regression (7f)   trained@0.5   36.7%     1,275  21.96%   50.63%    0.538   -4.615    -8.41    [-12.26, -4.75]
+Logistic Regression (7f)   trained@0.9    8.1%       304  38.82%   49.37%   -1.071   -6.224    -8.43    [-16.80, -0.34]
+Logistic Regression (7f)   rv@0.5        23.3%       775  29.29%   51.47%    0.972   -4.181    -8.64    [-14.39, -3.13]
+Logistic Regression (7f)   trained@0.8   11.3%       513  30.99%   46.76%   -2.783   -7.937    -9.73    [-14.09, -6.60]
+Logistic Regression (OFI)  trained@0.5   36.7%     1,275  22.35%   51.54%    0.746   -4.407   -10.33    [-15.33, -6.18]
+XGBoost                    none         100.0%     2,652  16.86%   51.98%    0.630   -4.523   -11.90    [-16.35, -7.96]
+Logistic Regression (7f)   none         100.0%     2,652  17.01%   52.44%    0.400   -4.753   -12.97    [-17.36, -9.00]
+Logistic Regression (OFI)  trained@0.8   11.3%       513  33.33%   50.29%   -0.426   -5.580   -14.83    [-21.86, -9.81]
+Logistic Regression (OFI)  none         100.0%     2,652  17.16%   52.91%    0.777   -4.377   -14.93   [-20.52, -11.05]
+Logistic Regression (7f)   rv@0.8        23.5%       328  34.45%   47.28%   -2.423   -7.576   -16.67    [-30.84, -8.98]
+Logistic Regression (OFI)  rv@0.8        23.5%       328  37.80%   51.88%    1.819   -3.334   -17.37    [-58.43, -5.87]
+Logistic Regression (OFI)  rv@0.5        23.3%       775  29.16%   51.25%    0.500   -4.653   -18.89   [-27.45, -12.76]
+Logistic Regression (OFI)  rv@0.9        12.1%       201  40.30%   48.80%   -0.537   -5.691   -24.01                  -
+Logistic Regression (7f)   rv@0.9        12.1%       201  34.83%   42.17%   -7.856  -13.009   -28.50                  -
+
+hit     = predicted barrier touched first, over all trades
+hit|res = the same, over trades that reached a horizontal barrier at all
+          (the second is what B(2h-1) > c is about)
+
+!  Logistic Regression (7f) is pooled over 3 of 3 folds — its row is not comparable to the others.
+
+!  Logistic Regression (OFI) is pooled over 3 of 3 folds — its row is not comparable to the others.
+
+!  XGBoost is pooled over 3 of 3 folds — its row is not comparable to the others.
+
+Wrote ../data/wf_long.json
+=== DONE Mon Aug 10 22:56:35 CEST 2026 ===

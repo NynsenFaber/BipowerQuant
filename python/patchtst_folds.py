@@ -8,7 +8,12 @@ model, and that a local run and a Colab run are the same computation.
 
     # locally, on whatever device is available
     python patchtst_folds.py --bars ../data/bars_6m.npz \\
-        --out ../data/patchtst_probs.npz --train-stride 20
+        --out ../data/patchtst_probs_short.npz --train-stride 20
+
+`--window-scale short|mid|long` selects the lookback (5 minutes, 2 hours, 24
+hours). The architecture does not otherwise change: `PatchTSTConfig.for_window`
+scales the patch geometry so all three read 37 tokens, and the batch size drops
+only where the patched tensor would not fit. One probability file per scale.
 
 The output is one probability array per fold, keyed by the fold name that
 `walkforward.build_folds` generates, which is what `walkforward.py
@@ -27,6 +32,7 @@ import argparse
 import json
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +44,7 @@ from patchtst_model import (
     PatchTSTClassifier,
     PatchTSTConfig,
     WindowBatcher,
+    batch_size_for,
     binary_metrics,
     predict_proba,
     save_checkpoint,
@@ -138,8 +145,30 @@ def train_folds(
     touched = (side[label_bar] != 0) & defined[label_bar]
     purge = window + horizon - 1
 
-    cfg = config or PatchTSTConfig(n_channels=channels.shape[1], seq_len=window)
+    cfg = config or PatchTSTConfig.for_window(window, n_channels=channels.shape[1])
+    if cfg.seq_len != window:
+        raise ValueError(
+            f"config.seq_len is {cfg.seq_len} but the windows are {window} bars. "
+            "The batcher gathers `window` bars and the model patches `seq_len` of "
+            "them, so a mismatch is a silent misalignment rather than an error — "
+            "build the config with PatchTSTConfig.for_window(window)."
+        )
+    # The patched tensor grows with the patch length, so a batch that is
+    # comfortable at the 5-minute scale allocates 288x as much at the 24-hour
+    # one. Clamped rather than merely defaulted: a caller passing the batch size
+    # this project has always used would otherwise discover the problem as a
+    # CUDA OOM some way into the first fold, having already paid for the probe.
     train_cfg = train_config or TrainConfig()
+    fitted = batch_size_for(cfg, train_cfg.batch_size)
+    fitted_eval = batch_size_for(cfg, train_cfg.eval_batch_size)
+    if (fitted, fitted_eval) != (train_cfg.batch_size, train_cfg.eval_batch_size):
+        if verbose:
+            print(
+                f"batch {train_cfg.batch_size} -> {fitted}, eval batch "
+                f"{train_cfg.eval_batch_size} -> {fitted_eval} "
+                f"(patch length {cfg.patch_len} at a {window}-bar lookback)"
+            )
+        train_cfg = replace(train_cfg, batch_size=fitted, eval_batch_size=fitted_eval)
 
     # One upload, shared by every fold and split. At two channels and six months
     # this is ~125 MB; materialising windows instead would be tens of GB.
@@ -202,7 +231,7 @@ def train_folds(
             verbose=verbose,
         )
 
-        probs = predict_proba(model, view(test_idx), batch_size=4096)
+        probs = predict_proba(model, view(test_idx), batch_size=train_cfg.eval_batch_size)
         probabilities[fold.name] = probs.astype(np.float32)
 
         # AUC is only defined where a side exists; the full vector still ships.
@@ -235,6 +264,7 @@ def train_folds(
                     "horizon": horizon,
                     "barrier": barrier,
                     "label_mode": "triple_barrier",
+                    "window_scale": seq.scale_of(window),
                     "channels": list(seq.CHANNEL_SETS[channel_set]),
                     "fold": fold.as_dict(),
                     "train_stride": train_stride,
@@ -255,6 +285,8 @@ def train_folds(
         print(f"\nall folds done in {elapsed:.2f} h")
     return probabilities, {
         "folds": summary,
+        "window": window,
+        "window_scale": seq.scale_of(window),
         "train_stride": train_stride,
         "projected_hours": projected,
         "elapsed_hours": elapsed,
@@ -272,12 +304,24 @@ def main() -> None:
     parser.add_argument("--out", required=True, help=".npz of per-fold probabilities")
     parser.add_argument("--scheme", default="anchored", choices=wf.SCHEMES)
     parser.add_argument("--train-months", type=int, default=3)
+    parser.add_argument(
+        "--window-scale",
+        default=None,
+        choices=sorted(seq.WINDOW_SCALES),
+        help="named lookback; overrides --window "
+        + ", ".join(f"{k}={v}s" for k, v in seq.WINDOW_SCALES.items()),
+    )
     parser.add_argument("--window", type=int, default=seq.WINDOW_SIZE)
     parser.add_argument("--horizon", type=int, default=seq.HORIZON)
     parser.add_argument("--barrier", type=float, default=seq.BARRIER)
     parser.add_argument("--channels", default="raw", choices=sorted(seq.CHANNEL_SETS))
     parser.add_argument("--epochs", type=int, default=12)
-    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=TrainConfig.batch_size,
+        help="clamped down if the lookback makes the patched tensor too large",
+    )
     parser.add_argument("--train-stride", type=int, default=None)
     parser.add_argument("--val-stride", type=int, default=8)
     parser.add_argument("--time-budget-hours", type=float, default=None)
@@ -285,19 +329,24 @@ def main() -> None:
     parser.add_argument("--checkpoint-dir", default=None)
     args = parser.parse_args()
 
+    window = seq.window_for(args.window_scale) if args.window_scale else args.window
+
     bars = wf.load_bars(args.bars)
     folds = wf.build_folds(bars["ts"], args.scheme, args.train_months)
-    print(f"{bars['meta']['n_bars']:,} bars | {len(folds)} {args.scheme} fold(s)")
+    print(
+        f"{bars['meta']['n_bars']:,} bars | {len(folds)} {args.scheme} fold(s) | "
+        f"{seq.scale_of(window)} lookback ({window}s)"
+    )
 
     channels = seq.CHANNEL_SETS[args.channels]
     probabilities, meta = train_folds(
         bars,
         folds,
-        window=args.window,
+        window=window,
         horizon=args.horizon,
         barrier=args.barrier,
         channel_set=args.channels,
-        config=PatchTSTConfig(n_channels=len(channels), seq_len=args.window),
+        config=PatchTSTConfig.for_window(window, n_channels=len(channels)),
         train_config=TrainConfig(epochs=args.epochs, batch_size=args.batch_size),
         train_stride=args.train_stride,
         val_stride=args.val_stride,

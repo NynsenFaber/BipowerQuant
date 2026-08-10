@@ -147,7 +147,10 @@ def main() -> None:
     truth = batcher.numpy_labels()
 
     metrics = binary_metrics(truth, probabilities, threshold=args.threshold)
-    ci = seq.block_bootstrap_auc(truth, probabilities)
+    # The checkpoint records the lookback it was trained at, and the block has
+    # to follow it: windows at a 24-hour lookback stay correlated for 90,000
+    # rows, not the 3,899 the short-lookback default assumes.
+    ci = seq.block_bootstrap_auc(truth, probabilities, block=dataset.window + dataset.horizon)
     print("\n✅ PatchTST Evaluated Successfully")
     print("=========================================")
     print(format_metrics(metrics))
