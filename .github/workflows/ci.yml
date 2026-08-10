@@ -106,6 +106,18 @@ jobs:
         with:
           name: coverage-ubuntu-latest
 
+      # codecov-action@v5 requires a token for repos on established Codecov
+      # orgs; without one the upload is tokenless, gets rate-limited/rejected,
+      # and (because fail_ci_if_error is false below) the job still reports
+      # green. This makes that failure mode visible in the run summary
+      # instead of only showing up as a stale badge on codecov.io.
+      - name: Check Codecov token
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -z "${{ secrets.CODECOV_TOKEN }}" ]; then
+            echo "::warning::CODECOV_TOKEN secret is not set — the Codecov upload below will likely fail silently. Add a repository secret named CODECOV_TOKEN with the upload token from https://codecov.io/gh/NynsenFaber/BipowerQuant/settings."
+          fi
+
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
         with:
