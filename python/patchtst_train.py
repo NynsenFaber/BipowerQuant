@@ -73,7 +73,7 @@ def _amp_setup(device: torch.device, enabled: bool):
         return torch.bfloat16, None
     try:
         scaler = torch.amp.GradScaler("cuda")
-    except AttributeError, TypeError:  # older torch
+    except (AttributeError, TypeError):  # older torch
         scaler = torch.cuda.amp.GradScaler()
     return torch.float16, scaler
 

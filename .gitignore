@@ -41,3 +41,6 @@ weights/*.pt
 # Private working notes — run history, audit trail, next steps
 TODO.md
 NOTE.md
+
+.vscode
+.cache
