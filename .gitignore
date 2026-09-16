@@ -21,14 +21,18 @@ coverage.xml
 htmlcov/
 junit*.xml
 
+# Editor state
+.vscode/
+
 # Local data, caches and generated results
-training_logs.txt
 *.csv
 *.parquet
 *.npz
 # Scored metrics and walk-forward results: regenerable, and the figures that read
 # them are committed. `git add -f` one if you want a specific run to stay pinned.
 data/*.json
+# Run transcripts. Same reasoning: a log is a record of one machine's afternoon.
+*.log
 
 # Trained model checkpoints (git add -f the ones worth keeping)
 weights/*.pt

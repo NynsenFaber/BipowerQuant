@@ -1,16 +1,27 @@
-"""
-Tabular feature matrix for the Logistic Regression and XGBoost baselines.
+"""The 7 tabular features, computed by the C++ engine.
 
-Each 5-minute lookback window is collapsed into 7 scalars by the C++ engine
-(`bipower_core`) and labelled by the triple-barrier method. `sequence_matrix.py`
-owns the two things both pipelines must agree on — the 1-second bar grid and the
-labels — so the tabular and sequence models are guaranteed to be solving the
-identical problem on the identical windows rather than approximately so.
+This is the **cross-check path**, and that is the whole reason it exists as a
+separate module. The same seven features are computed twice, two different ways:
+
+* here, by `bipower_core`'s sliding-window C++ loop, which walks each window
+  explicitly and accumulates the sums term by term;
+* in `sequence_matrix.build_tabular_features`, by NumPy cumulative sums written
+  from the formulas in the README rather than transcribed from that loop.
+
+`tests/test_pipeline.py::test_the_two_feature_paths_agree` asserts the two match.
+Two independent implementations of the same formulas agreeing is evidence the
+formulas were implemented correctly; one implementation agreeing with itself is
+not. The production pipelines (`walkforward.py`, `sweep_barriers.py`) all use the
+NumPy path, because it is vectorised across every window at once and needs no
+compiled extension — which is also what lets them run unchanged inside Colab.
+
+Both paths take their bar grid and their labels from `sequence_matrix.py`, so a
+disagreement can only come from the feature arithmetic itself.
 
 The bar grid is **complete**: every second in the period gets a bar, trade-less
 seconds carrying a forward-filled price and zero volume. That matters more than
 it sounds like it should. This module previously used Polars' `group_by_dynamic`,
-which emits a bar only for seconds that contain a trade — and on BTC/USDT ~15% of
+which emits a bar only for seconds that contain a trade — and on BTC/USDT ~11% of
 seconds contain none, so a "60-bar horizon" was really a horizon of an arbitrary
 70-odd seconds that varied with how busy the market was. Under a triple barrier,
 where the vertical barrier *is* the horizon, that would make the label itself
@@ -23,14 +34,7 @@ import numpy as np
 
 import bipower_core  # type: ignore
 import sequence_matrix as seq
-from sequence_matrix import (  # re-exported so callers have one place to import from
-    BARRIER,
-    EPSILON,
-    HORIZON,
-    WINDOW_SIZE,
-)
-
-FEATURE_NAMES = seq.TABULAR_FEATURE_NAMES
+from sequence_matrix import BARRIER, EPSILON, HORIZON, WINDOW_SIZE
 
 
 def rolling_metrics(bars: dict, window: int = WINDOW_SIZE) -> dict:
@@ -104,48 +108,3 @@ def build_training_matrix(
 
     keep = usable[starts + window - 1]
     return X[keep], y_all[starts + window - 1][keep], starts[keep]
-
-
-def build_from_csv(
-    csv_path: str,
-    hours: float | None = None,
-    skip_hours: float = 0.0,
-    cache: str | None = None,
-    **kwargs,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Stream a raw trades CSV straight to `(X, y, starts, bars)`.
-
-    Cache handling — including the refusal to reuse a cache built over a
-    different slice — is `sequence_matrix.load_or_build_bars`'s job, so both
-    pipelines fail the same way on the same mistake.
-    """
-    bars = seq.load_or_build_bars(csv_path, hours=hours, skip_hours=skip_hours, cache=cache)
-    X, y, starts = build_training_matrix(bars, **kwargs)
-    return X, y, starts, bars
-
-
-if __name__ == "__main__":
-    import argparse
-
-    from data_feeder import FILE_PATH
-
-    parser = argparse.ArgumentParser(description="Smoke-test the tabular matrix builder.")
-    parser.add_argument("--csv", default=FILE_PATH)
-    parser.add_argument("--hours", type=float, default=8.0)
-    parser.add_argument("--cache", default=None, help="optional .npz bar cache")
-    parser.add_argument("--label-mode", default="triple_barrier", choices=seq.LABEL_MODES)
-    args = parser.parse_args()
-
-    print(f"Streaming {args.hours} hours from {args.csv} ...")
-    X, y, starts, bars = build_from_csv(
-        args.csv, hours=args.hours, cache=args.cache, label_mode=args.label_mode
-    )
-
-    print("✅ Matrix built successfully")
-    print(f"X matrix shape: {X.shape}")
-    print(f"y target shape: {y.shape}")
-    print(
-        f"Windows resolved by a horizontal barrier: {len(y):,} "
-        f"({len(y) / max(len(bars['price']) - WINDOW_SIZE - HORIZON + 1, 1):.2%} of the population)"
-    )
-    print(f"Upper barrier first (y = 1): {int(y.sum()):,} / {len(y):,} ({y.mean():.2%})")

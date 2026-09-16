@@ -5,7 +5,7 @@ lookback. The point is to exercise the wiring, not to reproduce a result: a test
 that trained the real 209k-parameter model would take longer than the CI budget
 and still tell you nothing a shape assertion does not.
 
-The checkpoint tests carry the most weight. `eval_patchtst.py` refuses to score a
+The checkpoint tests carry the most weight. A checkpoint consumer refuses to score a
 checkpoint whose recorded data recipe disagrees with the rebuilt one, which is
 only a safeguard if the recipe survives a save/load round trip intact.
 """
@@ -465,7 +465,7 @@ def test_a_checkpoint_from_another_format_is_refused(tmp_path):
 
 
 def test_checkpoint_records_the_data_recipe_that_gates_evaluation(tmp_path):
-    """`eval_patchtst.py` refuses to score on a mismatch, so this must round-trip."""
+    """A consumer refuses to score on a recipe mismatch, so this must round-trip."""
     recipe = {
         "source": "BTCUSDT-trades-2026-05.csv",
         "n_bars": 2_678_400,
@@ -501,8 +501,8 @@ def test_describe_checkpoint_names_the_label_mode(tmp_path):
     assert "triple_barrier" in describe_checkpoint(payload)
 
 
-def test_describe_checkpoint_flags_pre_triple_barrier_weights(tmp_path):
-    """Older checkpoints carry no `label_mode`; scoring them silently would be worse."""
+def test_describe_checkpoint_flags_weights_that_did_not_record_their_target(tmp_path):
+    """A checkpoint that does not say what it was fitted against must not be scored."""
     _, payload = load_checkpoint(
         save_checkpoint(
             tmp_path / "old.pt",
@@ -511,13 +511,13 @@ def test_describe_checkpoint_flags_pre_triple_barrier_weights(tmp_path):
         )
     )
 
-    assert "pre-triple-barrier" in describe_checkpoint(payload)
+    assert "unrecorded" in describe_checkpoint(payload)
 
 
-def test_dataset_kwargs_from_defaults_to_the_old_label_mode():
-    """The documented fallback that keeps pre-switch checkpoints reproducible."""
+def test_dataset_kwargs_from_defaults_to_the_current_target():
+    """A key the checkpoint omitted resolves to what the code would have used anyway."""
     kwargs = seq.dataset_kwargs_from({"window": 300, "horizon": 60, "barrier": 0.0005})
-    assert kwargs["label_mode"] == "fee_threshold"
+    assert kwargs["label_mode"] == "triple_barrier"
 
 
 def test_dataset_kwargs_from_preserves_a_recorded_label_mode():

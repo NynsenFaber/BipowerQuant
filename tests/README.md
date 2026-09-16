@@ -2,7 +2,7 @@
 
 ```bash
 uv sync --group test
-uv run pytest                      # everything, ~4 s
+uv run pytest                      # 259 tests, ~4 s
 uv run pytest -m "not slow"        # skip the tests that fit models
 uv run pytest --cov                # with coverage
 uv run pytest tests/test_backtest.py -k oracle -v
@@ -23,18 +23,21 @@ against it would be checking a market rather than a function.
 | `test_backtest.py` | costs, queue fills, `simulate` | non-overlap and the oracle bound |
 | `test_walkforward.py` | folds and pooling | calendar edges a six-month sample never hits |
 | `test_patchtst.py` | model, batching, checkpoints | tiny configs; wiring, not results |
-| `test_pipeline.py` | `ml_matrix`, fold rows, stride budget | where the purge actually happens |
+| `test_pipeline.py` | `ml_matrix`, fold rows, stride budget | the C++/NumPy feature cross-check, and where the purge happens |
 | `test_integration.py` | `train_folds`, `run_fold` end to end | all `slow`; the only tests of how the pieces connect |
 
 ## Two things worth knowing before adding a test
 
 **The bar fixture is calibrated, not arbitrary.** `make_bars` defaults to a
-per-bar volatility that puts ~34% of 60-second windows through the 5 bp barrier,
-against 39.7% in the real six months. Both degenerate regimes hide bugs: at high
-volatility every window resolves, so the vertical barrier is never exercised and
-overshoot swamps the barrier width; at low volatility almost nothing resolves and
-the side label is nearly empty. If you change `volatility`, check what it does to
-the touch rate first.
+per-bar volatility that puts 33-40% of `TEST_HORIZON`-second windows through
+`TEST_BARRIER`, against the 36.5% the production target resolves on the real six
+months. The fixtures use a 5 bp / 60 s target of their own rather than production's
+60 bp / 3600 s, because an hour-long horizon leaves a 2,000-bar fixture with no
+labelled windows at all — see the comment on those constants in `conftest.py`.
+Both degenerate regimes hide bugs: at high volatility every window resolves, so
+the vertical barrier is never exercised and overshoot swamps the barrier width; at
+low volatility almost nothing resolves and the side label is nearly empty. If you
+change `volatility`, check what it does to the touch rate first.
 
 **Import order in `conftest.py` is load-bearing.** On macOS, torch and xgboost
 ship separate OpenMP runtimes; xgboost must be imported first *and* torch pinned
@@ -54,10 +57,13 @@ and those are the ones to keep working if the code moves under them:
   window counts the same price move hundreds of times and reports a Sharpe
   inflated by roughly √overlap, in the flattering direction.
 * **Training ends before testing begins**, asserted on every fold and every
-  scheme. A leak here fails nothing; it just raises every AUC in §3.
-* **An oracle still loses money.** 5 bp of target against a 6 bp round trip is
-  the project's central finding, so it is asserted rather than argued.
+  scheme. A leak here fails nothing; it just raises every AUC in README §5.
+* **An oracle still loses money** when the barrier is narrower than the round
+  trip. That a target has to be worth more than its own costs is the argument
+  README §1 is built on, so it is asserted rather than argued.
+* **The break-even identity holds.** `h* = ½(1 + c/(ρG))`, the formula that chose
+  the 60 bp / 3600 s target, pinned against hand-computed cases.
 * **`train_folds` accepts `on_fold_complete`.** A regression test: the callback
-  was documented and passed by `train_patchtst_local.py` but not accepted by
+  was documented and passed by the training driver but not accepted by
   `train_folds`, which passed every unit test and still killed the run at the
   first fold boundary. Integration tests exist for that class of failure.

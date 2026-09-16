@@ -1,17 +1,25 @@
-"""Regenerate the README figures from a checkpoint and a bar cache.
+"""Regenerate every figure the README embeds.
 
     cd python
-    python make_figures.py --weights ../weights/patchtst_BTCUSDT_2026-05_full.pt \
-                           --bars-cache ../data/bars_full.npz
+    python make_figures.py --result ../data/wf_final.json --bars ../data/bars_6m.npz
 
-Every number plotted is recomputed here from the held-out test split — nothing is
-hard-coded — so a figure cannot silently drift away from the result it claims to
-show. Writes PNGs to `assets/`.
+Two inputs, because the figures answer two different kinds of question:
 
-The three figures answer three questions, in order:
-  1. Does any trained model out-rank a single untrained feature?
-  2. What did switching to the triple-barrier target actually change?
-  3. Where is the model confident, and does it hold across volatility regimes?
+* `--result` is the JSON that `walkforward.py --out` wrote. Three figures read it,
+  so every number plotted is one that run actually produced — nothing here is
+  hard-coded, and a figure cannot drift away from the result it claims to show.
+* `--bars` is a 1-second bar cache from `sequence_matrix.save_bars`. One figure
+  reads it to describe the tape itself.
+
+Either flag may be omitted; only the figures whose input is present get drawn.
+PNGs are written to `assets/`.
+
+The four figures, in the order the README uses them:
+
+  1. `dataset.png`         — what the tape looks like, and what labelling does to it.
+  2. `economics.png`       — what payoff a given hit rate needs to cover its costs.
+  3. `walkforward_auc.png` — which prediction survives a month it was not trained on.
+  4. `backtest.png`        — what the strategy actually earns, net of costs.
 """
 
 from __future__ import annotations
@@ -20,46 +28,24 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
-
-# macOS OpenMP: both halves of the rule from benchmark_inference.py apply here,
-# because this script is the one place that fits XGBoost *and* runs torch in a
-# single process. xgboost must be imported first, AND torch must be pinned to one
-# thread — "xgboost first, no pinning" deadlocks inside torch's first tensor copy
-# after xgboost has opened an OpenMP region, with no error and no CPU burn.
-import xgboost  # noqa: F401  — must precede torch
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.ticker import FuncFormatter  # noqa: E402
-from sklearn.metrics import roc_auc_score  # noqa: E402
 
 import sequence_matrix as seq  # noqa: E402
-
-# benchmark_inference owns the safe import order and refuses to load if torch beat
-# it, so it must come before the first `import torch` here, not after.
-from benchmark_inference import _assert_openmp_safe, fit_tabular_baselines  # noqa: E402
-
-_assert_openmp_safe()
-
-import torch  # noqa: E402
-
-torch.set_num_threads(1)  # the other half of the rule — without this it deadlocks
-
-from patchtst_model import WindowBatcher, load_checkpoint, predict_proba  # noqa: E402
+import walkforward as wf  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ASSETS = REPO_ROOT / "assets"
 
-# --- palette (validated: light surface #fcfcfb, all-pairs CVD ΔE 9.2) ---------
-SURFACE = "#fcfcfb"
-INK = "#0b0b0b"
-INK_2 = "#52514e"
-MUTED = "#898781"
-GRID = "#e1e0d9"
-AXIS = "#c3c2b7"
-BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
+# One palette for every figure, so the four read as one document rather than as
+# four charts that happen to sit in the same file. Validated for colour-vision
+# deficiency: all pairs are at least 9.2 dE apart on the #fcfcfb surface.
+SURFACE, INK, INK_2, MUTED = "#fcfcfb", "#0b0b0b", "#52514e", "#898781"
+GRID, AXIS = "#e1e0d9", "#c3c2b7"
+BLUE, ORANGE, AQUA, PLUM = "#2a78d6", "#eb6834", "#1baf7a", "#8b5fbf"
 
 plt.rcParams.update(
     {
@@ -81,339 +67,13 @@ plt.rcParams.update(
 )
 
 
-def _clean(ax, x_grid=True):
+def _clean(ax, axis="y"):
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     ax.set_axisbelow(True)
-    ax.grid(axis="x" if x_grid else "y", linestyle="-", alpha=0.9)
-    ax.grid(axis="y" if x_grid else "x", visible=False)
+    ax.grid(axis=axis, linestyle="-", alpha=0.9)
+    ax.grid(axis="x" if axis == "y" else "y", visible=False)
     ax.tick_params(length=0)
-
-
-def compute(
-    weights: Path | None, bars_cache: Path, device: str, batch_size: int, label_mode: str
-) -> dict:
-    """Score every available model on the identical held-out windows.
-
-    `weights=None` draws the figures for the tabular models alone. That is the
-    useful default before a PatchTST checkpoint exists: the label-contrast figure
-    needs no network at all, and the other two are still readable without it.
-    """
-    bars = seq.load_bars(bars_cache)
-
-    if weights is not None:
-        model, payload = load_checkpoint(weights, map_location=device)
-        meta = payload.get("data_meta", {})
-    else:
-        model, meta = None, {"label_mode": label_mode}
-    ds = seq.build_sequence_dataset(bars, **seq.dataset_kwargs_from(meta))
-
-    price = bars["price"]
-    test = ds.splits["test"]
-    full_channels = seq.build_channels(bars, "full")
-    X_train = seq.build_tabular_features(full_channels, price, ds.splits["train"], ds.window)
-    X_test = seq.build_tabular_features(full_channels, price, test, ds.window)
-
-    y_test = ds.labels("test").astype(np.int8)
-    barrier = ds.meta["barrier"]
-
-    # The label-flip control. Under the triple barrier the "other" label is the
-    # side the path would have been given had the barriers been read backwards —
-    # which is just 1 - y, so the flip test is degenerate and unnecessary: a
-    # volatility forecast cannot score on a label whose two classes require the
-    # same move. It is only informative for the old compound target, where the
-    # magnitude and the sign were bundled into one class.
-    end = test + ds.window - 1
-    forward = price[end + ds.horizon] / price[end] - 1.0
-    flipped_label = (forward < -barrier).astype(np.int8)
-    flip_is_informative = ds.meta.get("label_mode") == "fee_threshold"
-
-    logistic, booster = fit_tabular_baselines(X_train, ds.labels("train"))
-
-    probs = {
-        "Logistic Regression": logistic.predict_proba(X_test[:, [3]])[:, 1],
-        "XGBoost": booster.predict_proba(X_test)[:, 1],
-    }
-    if model is not None:
-        model.to(device)
-        batcher = WindowBatcher(ds.channels, test, y_test, seq_len=ds.window, device=device)
-        probs["PatchTST"] = predict_proba(model, batcher, batch_size=batch_size)
-
-    rv = X_test[:, 0].astype(np.float64)
-    singles = {
-        "Realized variance": rv,
-        "|5m return|": np.abs(X_test[:, 4].astype(np.float64)),
-        "Order flow imbalance": X_test[:, 3].astype(np.float64),
-        "5m return": X_test[:, 4].astype(np.float64),
-    }
-    decile = np.clip((np.argsort(np.argsort(rv)) * 10) // rv.size, 0, 9)
-
-    def safe_auc(truth: np.ndarray, score: np.ndarray) -> float:
-        # A decile can be single-class on a small slice; report NaN, not 0.5.
-        if truth.size == 0 or truth.sum() in (0, truth.size):
-            return float("nan")
-        return float(roc_auc_score(truth, score))
-
-    def profile(score: np.ndarray) -> dict:
-        return {
-            "auc": safe_auc(y_test, score),
-            "auc_flipped": safe_auc(flipped_label, score),
-            "deciles": [safe_auc(y_test[decile == d], score[decile == d]) for d in range(10)],
-            # Keys are percent-as-string so the cache round-trips through JSON.
-            "topk": {
-                str(pct): float(y_test[np.argsort(-score)[: int(pct * score.size / 100)]].mean())
-                for pct in (1, 5, 10, 25, 50)
-            },
-        }
-
-    return {
-        "models": {name: profile(p) for name, p in probs.items()},
-        "singles": {name: profile(s) for name, s in singles.items()},
-        "label_contrast": label_contrast(bars, full_channels, meta),
-        "base_rate": float(y_test.mean()),
-        "n_test": int(test.size),
-        "label_mode": ds.meta.get("label_mode", "triple_barrier"),
-        "barrier": float(barrier),
-        "horizon": int(ds.horizon),
-        "touch_rate": float(ds.meta.get("touch_rate", float("nan"))),
-        "flip_is_informative": bool(flip_is_informative),
-    }
-
-
-# Single features are free to score, so the two labellings can be compared on the
-# same held-out period without a second pass of network inference.
-CONTRAST_FEATURES = {
-    "Realized variance": 0,
-    "Bipower variation": 1,
-    "Jumps": 2,
-    "Order flow imbalance": 3,
-    "5m return": 4,
-}
-
-
-def label_contrast(bars: dict, full_channels: np.ndarray, meta: dict) -> dict:
-    """Untrained single features scored under both target definitions.
-
-    This is the figure that explains why the target was changed. The old target
-    (`forward_return > +5bp`) is a compound event — a large move happened *and*
-    it went up — so a pure volatility estimate ranks it well without any
-    directional skill at all. The triple-barrier target asks only which side is
-    touched first, and both of its classes require the same 5 bp move, so the
-    same volatility estimate collapses to a coin flip on it.
-    """
-    out = {}
-    for mode in ("fee_threshold", "triple_barrier"):
-        kwargs = {**seq.dataset_kwargs_from(meta), "label_mode": mode}
-        ds = seq.build_sequence_dataset(bars, **kwargs)
-        test = ds.splits["test"]
-        X = seq.build_tabular_features(full_channels, bars["price"], test, ds.window)
-        y = ds.labels("test").astype(np.int8)
-        out[mode] = {
-            "features": {
-                name: float(roc_auc_score(y, X[:, col].astype(np.float64)))
-                for name, col in CONTRAST_FEATURES.items()
-            },
-            "n": int(test.size),
-            "base_rate": float(y.mean()),
-        }
-    return out
-
-
-# --- figures ------------------------------------------------------------------
-
-
-def figure_auc(data: dict, path: Path) -> None:
-    """Headline AUC: trained models against untrained single features."""
-    rows = [(n, d["auc"], "model") for n, d in data["models"].items()]
-    rows += [(n, d["auc"], "single") for n, d in data["singles"].items()]
-    rows.sort(key=lambda r: r[1])
-    best_model = max(d["auc"] for d in data["models"].values())
-    best_single = max(d["auc"] for d in data["singles"].values())
-
-    fig, ax = plt.subplots(figsize=(7.6, 4.0))
-    colors = [BLUE if kind == "model" else ORANGE for *_, kind in rows]
-    y = np.arange(len(rows))
-    ax.barh(y, [r[1] for r in rows], height=0.62, color=colors)
-    ax.axvline(0.5, color=INK_2, linewidth=1.2, linestyle=(0, (4, 3)), zorder=3)
-    ax.text(0.5, len(rows) - 0.25, "  coin flip", color=INK_2, fontsize=8.5, va="center")
-
-    for i, (_, value, _) in enumerate(rows):
-        # Nudge labels that would otherwise be struck through by the 0.5 rule.
-        x = value + 0.006
-        if abs(x - 0.5) < 0.012:
-            x = 0.506
-        ax.text(x, i, f"{value:.4f}", va="center", fontsize=9, color=INK)
-
-    ax.set_yticks(y, [r[0] for r in rows], fontsize=9.5, color=INK)
-    lo = min(0.45, min(r[1] for r in rows) - 0.02)
-    ax.set_xlim(lo, max(0.62, max(r[1] for r in rows) + 0.05))
-    ax.set_xlabel(f"Test ROC-AUC on the trained target ({_target_label(data)})", fontsize=9)
-    _clean(ax)
-    handles = [
-        plt.Rectangle((0, 0), 1, 1, color=BLUE),
-        plt.Rectangle((0, 0), 1, 1, color=ORANGE),
-    ]
-    ax.legend(
-        handles,
-        ["Trained model", "Single feature, no training"],
-        frameon=False,
-        fontsize=8.5,
-        loc="lower right",
-        labelcolor=INK_2,
-    )
-    # Titled from the data, so restyling cannot leave a stale claim behind. The
-    # margin threshold is deliberate: on a signal this small, "the trained model
-    # is 0.003 ahead" is not a result, and a title that reads like one would be
-    # the same mistake the old fee-threshold headline made.
-    margin = best_model - best_single
-    if margin <= 0:
-        verdict = "Every trained model is out-ranked by a single untrained feature"
-    elif margin < 0.01:
-        verdict = "Training barely out-ranks the best single untrained feature"
-    else:
-        verdict = "Training now buys something no single feature does"
-    ax.set_title(verdict, fontsize=11.5, color=INK, pad=12, loc="left", fontweight="bold")
-    fig.text(
-        0.008,
-        0.005,
-        f"{data['n_test']:,} held-out windows · BTC/USDT May 2026 · base rate {data['base_rate']:.2%}",
-        fontsize=8,
-        color=MUTED,
-    )
-    fig.tight_layout()
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
-
-
-def figure_decomposition(data: dict, path: Path) -> None:
-    """What the target change did: the same features, scored under both labels."""
-    contrast = data["label_contrast"]
-    old, new = contrast["fee_threshold"], contrast["triple_barrier"]
-    names = list(CONTRAST_FEATURES)
-
-    fig, ax = plt.subplots(figsize=(8.2, 4.2))
-    x = np.arange(len(names))
-    width = 0.36
-    for i, (label, color, block) in enumerate(
-        [
-            (f"Old target: 1m return > +{data['barrier']:.2%}", ORANGE, old),
-            ("Triple barrier: which side is touched first", BLUE, new),
-        ]
-    ):
-        vals = [block["features"][n] for n in names]
-        pos = x + (i - 0.5) * width
-        ax.bar(pos, vals, width=width - 0.03, color=color, label=label)
-        for xi, v in zip(pos, vals):
-            ax.text(xi, v + 0.006, f"{v:.3f}", ha="center", fontsize=8.5, color=INK)
-
-    ax.axhline(0.5, color=INK_2, linewidth=1.2, linestyle=(0, (4, 3)), zorder=3)
-    ax.text(-0.48, 0.505, "coin flip", color=INK_2, fontsize=8.5)
-    ax.set_xticks(x, [n.replace(" ", "\n", 1) for n in names], fontsize=9, color=INK)
-    ax.set_xlim(-0.6, len(names) - 0.4)
-    ax.set_ylim(0.45, max(0.80, max(old["features"].values()) + 0.05))
-    ax.set_ylabel("Test ROC-AUC, no training", fontsize=9)
-    _clean(ax, x_grid=False)
-    ax.legend(
-        frameon=False,
-        fontsize=8.5,
-        labelcolor=INK_2,
-        ncol=2,
-        loc="lower center",
-        bbox_to_anchor=(0.5, 1.005),
-        handlelength=1.2,
-        columnspacing=1.6,
-        borderpad=0,
-    )
-    ax.set_title(
-        "The old target could be forecast by volatility alone; the new one cannot",
-        fontsize=11.5,
-        color=INK,
-        pad=30,
-        loc="left",
-        fontweight="bold",
-    )
-    fig.text(
-        0.008,
-        0.005,
-        f"Same held-out period. Old target: {old['n']:,} windows, {old['base_rate']:.1%} positive.  "
-        f"Triple barrier: {new['n']:,} windows that touched a barrier, {new['base_rate']:.1%} positive.",
-        fontsize=8,
-        color=MUTED,
-    )
-    fig.tight_layout()
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
-
-
-def figure_residual(data: dict, path: Path) -> None:
-    """Where the models are confident, and what is left after volatility."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.4, 4.0))
-    palette = {"PatchTST": BLUE, "XGBoost": ORANGE, "Logistic Regression": AQUA}
-    colors = {n: c for n, c in palette.items() if n in data["models"]}
-
-    pcts = ["1", "5", "10", "25", "50"]
-    xs = np.arange(len(pcts))
-    for name, color in colors.items():
-        vals = [data["models"][name]["topk"][p] for p in pcts]
-        ax1.plot(xs, vals, marker="o", markersize=6, linewidth=2, color=color, label=name)
-    ax1.axhline(data["base_rate"], color=INK_2, linewidth=1.2, linestyle=(0, (4, 3)))
-    ax1.text(
-        0.02,
-        data["base_rate"] + 0.012,
-        f"base rate {data['base_rate']:.3f}",
-        color=INK_2,
-        fontsize=8.5,
-    )
-    ax1.set_xticks(xs, [f"top {p}%" for p in pcts], fontsize=9)
-    ax1.set_ylabel("Precision", fontsize=9)
-    ax1.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.2f}"))
-    top = max(v for n in colors for v in data["models"][n]["topk"].values())
-    ax1.set_ylim(0, max(0.40, top * 1.25))
-    _clean(ax1, x_grid=False)
-    ax1.legend(frameon=False, fontsize=8.5, labelcolor=INK_2, loc="upper right")
-    ax1.set_title(
-        "Precision in the confident tail",
-        fontsize=10.5,
-        color=INK,
-        pad=10,
-        loc="left",
-        fontweight="bold",
-    )
-
-    all_deciles = []
-    for name, color in colors.items():
-        d = data["models"][name]["deciles"]
-        all_deciles += [v for v in d if not np.isnan(v)]
-        ax2.plot(
-            range(10),
-            d,
-            marker="o",
-            markersize=5,
-            linewidth=2,
-            color=color,
-            label=f"{name} (mean {np.nanmean(d):.3f})",
-        )
-    ax2.axhline(0.5, color=INK_2, linewidth=1.2, linestyle=(0, (4, 3)))
-    ax2.set_xticks(range(10), [str(d) for d in range(10)], fontsize=9)
-    # Plain ASCII: the bundled sans has no arrow glyph and renders tofu.
-    ax2.set_xlabel("Realized-variance decile (quiet to violent)", fontsize=9)
-    ax2.set_ylabel("ROC-AUC within decile", fontsize=9)
-    span = max(0.06, max(abs(v - 0.5) for v in all_deciles) * 1.3) if all_deciles else 0.1
-    ax2.set_ylim(0.5 - span, 0.5 + span)
-    _clean(ax2, x_grid=False)
-    ax2.legend(frameon=False, fontsize=8.5, labelcolor=INK_2, loc="lower right")
-    ax2.set_title(
-        "...and whether it holds across volatility regimes",
-        fontsize=10.5,
-        color=INK,
-        pad=10,
-        loc="left",
-        fontweight="bold",
-    )
-
-    fig.tight_layout()
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
 
 
 def figure_dataset(bars: dict, path: Path) -> dict:
@@ -433,8 +93,6 @@ def figure_dataset(bars: dict, path: Path) -> dict:
 
     # Calendar months, and which of them a walk-forward run holds out. Shading a
     # 70/10/20 split here would contradict how the models are actually validated.
-    import walkforward as wf
-
     months = wf.month_blocks(ts)
     try:
         folds = wf.build_folds(ts, "anchored", 3)
@@ -465,7 +123,7 @@ def figure_dataset(bars: dict, path: Path) -> dict:
         )
     ax1.set_ylabel("BTC/USDT", fontsize=9)
     ax1.set_ylim(price.min() * 0.99, price.max() * 1.05)
-    _clean(ax1, x_grid=False)
+    _clean(ax1)
     ax1.set_title(
         f"{len(months)} month{'s' if len(months) != 1 else ''} — {n:,} one-second bars "
         f"over {days:.0f} days"
@@ -483,7 +141,7 @@ def figure_dataset(bars: dict, path: Path) -> dict:
         np.arange(hourly.shape[0]) / 24.0, hourly.sum(axis=1), color=INK_2, linewidth=0, alpha=0.85
     )
     ax2.set_ylabel("trades / hour", fontsize=9)
-    _clean(ax2, x_grid=False)
+    _clean(ax2)
     ax2.set_title(
         f"{meta['traded_seconds']:,} seconds carry a trade; "
         f"{meta['empty_seconds']:,} ({meta['empty_seconds'] / n:.1%}) carry none "
@@ -552,72 +210,394 @@ def figure_dataset(bars: dict, path: Path) -> dict:
     }
 
 
-def _target_label(data: dict) -> str:
-    if data.get("label_mode") == "fee_threshold":
-        return f"forward {data['horizon']}s return > +{data['barrier']:.2%}"
-    return f"which +/-{data['barrier']:.2%} barrier is touched first, within {data['horizon']}s"
+def figure_walkforward(data: dict, path: Path) -> None:
+    """Gate vs side, fold by fold. One transfers across months; one does not."""
+    folds = data["folds"]
+    names = [f["fold"]["name"].split("-> ")[-1] for f in folds]
+    x = np.arange(len(folds))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.6, 4.1))
+
+    # -- left: the gate --
+    series = [
+        ("XGBoost, 7 features", BLUE, [f["gate"]["trained_auc"] for f in folds]),
+        ("Realized variance, untrained", ORANGE, [f["gate"]["rv_auc"] for f in folds]),
+    ]
+    width = 0.36
+    for i, (label, color, vals) in enumerate(series):
+        pos = x + (i - 0.5) * width
+        ax1.bar(pos, vals, width=width - 0.03, color=color, label=label)
+        for xi, v in zip(pos, vals):
+            ax1.text(xi, v + 0.006, f"{v:.3f}", ha="center", fontsize=8.5, color=INK)
+    ax1.axhline(0.5, color=INK_2, linewidth=1.2, linestyle=(0, (4, 3)))
+    ax1.text(-0.45, 0.508, "coin flip", color=INK_2, fontsize=8.5)
+    ax1.set_xticks(x, names, fontsize=9.5, color=INK)
+    ax1.set_ylim(0.45, 0.88)
+    ax1.set_ylabel("Test ROC-AUC", fontsize=9)
+    _clean(ax1)
+    ax1.legend(
+        frameon=False, fontsize=8.5, labelcolor=INK_2, loc="upper left", bbox_to_anchor=(0, 1.0)
+    )
+    ax1.set_title(
+        "Gate: will any barrier be touched?",
+        fontsize=10.5,
+        color=INK,
+        pad=10,
+        loc="left",
+        fontweight="bold",
+    )
+
+    # -- right: the side --
+    models = list(folds[0]["side_auc"])
+    colors = dict(zip(models, (AQUA, PLUM, BLUE, ORANGE)))
+    width = 0.8 / max(len(models), 1)
+    for i, model in enumerate(models):
+        vals = [f["side_auc"][model] for f in folds]
+        pos = x + (i - (len(models) - 1) / 2) * width
+        ax2.bar(pos, vals, width=width - 0.02, color=colors[model], label=model)
+    ax2.axhline(0.5, color=INK_2, linewidth=1.2, linestyle=(0, (4, 3)))
+    ax2.set_xticks(x, names, fontsize=9.5, color=INK)
+    ax2.set_ylim(0.45, 0.88)
+    ax2.set_ylabel("Test ROC-AUC", fontsize=9)
+    _clean(ax2)
+    ax2.legend(frameon=False, fontsize=8, labelcolor=INK_2, loc="upper left", ncol=1)
+    ax2.set_title(
+        "Side: which barrier first?",
+        fontsize=10.5,
+        color=INK,
+        pad=10,
+        loc="left",
+        fontweight="bold",
+    )
+
+    # Read off the panels rather than asserted. "Direction does not [survive]" was
+    # true of the tabular models alone; a side model that clears 0.52 in every
+    # fold falsifies it, and the headline has to follow the bars it sits above.
+    # 0.52 is the threshold the appendix names as the boundary of a real edge.
+    best_side = max((min(f["side_auc"][m] for f in folds), m) for m in folds[0]["side_auc"])
+    worst_of_best, best_model = best_side
+    if worst_of_best < 0.52:
+        headline = (
+            "Volatility forecasts survive a month they were not trained on. Direction does not."
+        )
+    else:
+        headline = (
+            "Volatility transfers across months. So does direction — but only for "
+            f"{best_model}, and only just."
+        )
+
+    fig.suptitle(
+        headline,
+        fontsize=11.5,
+        color=INK,
+        x=0.008,
+        ha="left",
+        y=1.03,
+        fontweight="bold",
+    )
+    fig.text(
+        0.008,
+        -0.02,
+        "Each fold trains only on months before its test month "
+        f"({data['config']['scheme']}, {data['config']['train_months']} training months).",
+        fontsize=8,
+        color=MUTED,
+    )
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def figure_economics(data: dict, path: Path) -> None:
+    """The payoff a given hit rate needs before it pays for its own costs.
+
+    The x axis is the hit rate among *resolved* trades and the y axis is the
+    expected payoff per trade — `rho * G`, the share of positions that reach a
+    horizontal barrier times the magnitude captured when one does. Plotting `rho *
+    G` rather than the barrier `B` is the correction this figure exists to make:
+    the two are not interchangeable, because widening `B` at a fixed deadline
+    lowers `rho`, and a chart drawn against `B` implies a lever that does not
+    exist.
+    """
+    cost = data["config"]["breakeven_barrier_bps"]
+    target = data["config"]["target"]
+    payoff = target["resolved_share"] * target["captured_bps"]
+
+    hits = np.linspace(0.505, 0.80, 400)
+    required = cost / (2 * hits - 1)
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.4))
+    ax.plot(hits * 100, required, color=INK, linewidth=2)
+    ax.fill_between(hits * 100, required, 1e4, color=AQUA, alpha=0.12)
+    ax.fill_between(hits * 100, 0, required, color=ORANGE, alpha=0.12)
+
+    ax.axhline(payoff, color=ORANGE, linewidth=1.4, linestyle=(0, (4, 3)))
+    ax.text(
+        79.5,
+        payoff * 1.12,
+        f"this target pays {payoff:.1f} bp per trade "
+        f"({target['resolved_share']:.0%} resolve x {target['captured_bps']:.0f} bp)",
+        fontsize=8.5,
+        color=ORANGE,
+        ha="right",
+    )
+
+    # `resolved_hit_rate`, not `hit_rate`: the identity is about trades that ended
+    # at a barrier, so the denominator has to exclude positions closed by the
+    # clock. Mixing timeouts in drives h below 0.5 and the required payoff
+    # negative, which is arithmetic nonsense rather than a result.
+    measured = [
+        (r.get("resolved_hit_rate", float("nan")) * 100, r["model"])
+        for r in data["pooled"]
+        if r["gate"] == "none" and r["n_trades"] > 100
+    ]
+    measured = [m for m in measured if np.isfinite(m[0])]
+    lo, hi = ax.get_xlim()
+    for hit, _ in measured:
+        if lo <= hit <= hi:
+            ax.plot(
+                [hit],
+                [payoff],
+                marker="o",
+                markersize=7,
+                color=BLUE,
+                markeredgecolor=SURFACE,
+                markeredgewidth=1.5,
+                zorder=5,
+            )
+    if measured:
+        best = max(h for h, _ in measured)
+        needed = cost / (2 * best / 100 - 1) if best > 50 else float("inf")
+        if lo <= best <= hi:
+            ax.annotate(
+                f"measured: {best:.1f}%",
+                xy=(best, payoff),
+                xytext=(best + 2.5, payoff * 4.0),
+                fontsize=9,
+                color=INK,
+                arrowprops=dict(arrowstyle="-", color=MUTED, linewidth=0.9),
+            )
+        note = (
+            f"Expected value per trade is (rho x G)(2h-1) - c. At c = {cost:.2f} bp, the "
+            f"measured {best:.1f}% hit rate needs {needed:,.0f} bp of payoff; this target "
+            f"supplies {payoff:.1f}. Break-even would need h = {target['required_hit_rate']:.1%}."
+            if np.isfinite(needed)
+            else f"Expected value per trade is (rho x G)(2h-1) - c. The measured hit rate of "
+            f"{best:.1f}% is at or below a coin flip, so no payoff makes it profitable."
+        )
+    else:
+        note = (
+            f"Expected value per trade is (rho x G)(2h-1) - c, with c = {cost:.2f} bp. "
+            f"This target needs h = {target['required_hit_rate']:.1%} to break even."
+        )
+
+    # Limits chosen from the data: the payoff line and the break-even curve over
+    # the plotted hit rates must both be inside the axes at any (barrier, horizon),
+    # and a decade of headroom either side keeps the log grid readable.
+    span = np.concatenate((required, [payoff]))
+    ax.set_yscale("log")
+    ax.set_xlim(50.5, 80)
+    ax.set_ylim(10 ** np.floor(np.log10(span.min()) - 0.5), 10 ** np.ceil(np.log10(span.max())))
+    ax.set_xlabel("Hit rate: how often the predicted barrier is touched first (%)", fontsize=9)
+    ax.set_ylabel("Payoff per trade needed to break even (bp, log scale)", fontsize=9)
+    _clean(ax)
+    # Placed in axes fractions rather than data coordinates: the limits above are
+    # computed from the result, so a hardcoded position lands off-figure the first
+    # time the target changes.
+    ax.text(
+        0.55, 0.86, "profitable", transform=ax.transAxes, fontsize=10, color=AQUA, fontweight="bold"
+    )
+    ax.text(
+        0.04,
+        0.08,
+        "unprofitable",
+        transform=ax.transAxes,
+        fontsize=10,
+        color=ORANGE,
+        fontweight="bold",
+    )
+    ax.set_title(
+        f"A {cost:.2f} bp round trip sets the price of being right",
+        fontsize=11.5,
+        color=INK,
+        pad=12,
+        loc="left",
+        fontweight="bold",
+    )
+    fig.text(0.008, -0.02, note, fontsize=8, color=MUTED)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _common_gate(rows: list[dict], models: list[str]) -> tuple[str, float] | None:
+    """The tightest gate every model shares, so the bars compare like with like.
+
+    Picking each model's *own* best configuration would let every bar come from a
+    different traded population, which turns a model comparison into a comparison
+    of whichever gate happened to suit each model — and flatters the weak ones,
+    since the maximum of seven noisy numbers is not zero. The tightest shared gate
+    is the population the README quotes, and on it every model is deciding the
+    direction of the *same* trades.
+    """
+    shared = [
+        key
+        for key in {(r["gate"], r["gate_quantile"]) for r in rows}
+        if {r["model"] for r in rows if (r["gate"], r["gate_quantile"]) == key} >= set(models)
+    ]
+    if not shared:
+        return None
+    # Highest quantile = most selective; "none" (quantile 0) only if nothing else.
+    return max(shared, key=lambda k: (k[0] != "none", k[1]))
+
+
+def figure_backtest(data: dict, path: Path) -> None:
+    """Gross vs net per trade, every model on one identical traded population.
+
+    Two panels rather than one: plotted together, a gross of a few bp against a
+    net of -5 bp puts the quantity that carries the finding at sub-pixel height,
+    where it reads as missing data. Gross is the column that does not depend on
+    the cost assumptions, so it gets its own axis.
+    """
+    rows = [r for r in data["pooled"] if r["n_trades"] > 100]
+    if not rows:
+        return
+    models = sorted({r["model"] for r in rows})
+    cost = data["config"]["breakeven_barrier_bps"]
+
+    gate = _common_gate(rows, models)
+    if gate is None:
+        return
+    best = {
+        m: next(r for r in rows if r["model"] == m and (r["gate"], r["gate_quantile"]) == gate)
+        for m in models
+    }
+
+    # Two panels, because the two quantities differ by three orders of magnitude:
+    # on a scale that shows -6 bp, a gross of +0.006 bp is a sub-pixel bar and
+    # reads as missing data rather than as the finding.
+    labels = [m.replace("Logistic Regression", "Logistic") for m in models]
+    x = np.arange(len(models))
+    gross = [best[m]["gross_bps"] for m in models]
+    net = [best[m]["net_bps"] for m in models]
+    span = max(0.05, max(abs(g) for g in gross) * 1.8)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.4, 4.2))
+
+    ax1.bar(x, gross, width=0.5, color=AQUA)
+    for xi, v in zip(x, gross):
+        ax1.text(
+            xi,
+            v + (span * 0.06 if v >= 0 else -span * 0.06),
+            f"{v:+.3f}",
+            ha="center",
+            va="bottom" if v >= 0 else "top",
+            fontsize=9,
+            color=INK,
+        )
+    ax1.axhline(0, color=INK, linewidth=1.2)
+    ax1.set_ylim(-span, span)
+    ax1.set_xticks(x, labels, fontsize=9)
+    ax1.set_ylabel("Basis points per trade", fontsize=9)
+    _clean(ax1)
+    ax1.set_title(
+        "Gross, before any cost", fontsize=10.5, color=INK, pad=10, loc="left", fontweight="bold"
+    )
+
+    ax2.bar(x, net, width=0.5, color=ORANGE)
+    for xi, v in zip(x, net):
+        ax2.text(xi, v - cost * 0.045, f"{v:.2f}", ha="center", va="top", fontsize=9, color=INK)
+    ax2.axhline(0, color=INK, linewidth=1.2)
+    # The round-trip line is labelled in the panel title rather than annotated on
+    # the axes: three bars leave no clear space for a caption at that height.
+    ax2.axhline(-cost, color=MUTED, linewidth=1.1, linestyle=(0, (4, 3)))
+    ax2.set_ylim(-cost * 1.3, cost * 0.12)
+    ax2.set_xticks(x, labels, fontsize=9)
+    _clean(ax2)
+    ax2.set_title(
+        f"Net, after the {cost:.1f} bp round trip (dashed)",
+        fontsize=10.5,
+        color=INK,
+        pad=10,
+        loc="left",
+        fontweight="bold",
+    )
+
+    # Chosen from the data, not asserted. The original title read "Gross P&L is
+    # zero, so net P&L is exactly minus the cost", which was true of the three
+    # tabular models and became false the moment PatchTST was added — its gross is
+    # an order of magnitude larger and consistently positive. A hardcoded headline
+    # would have kept claiming the old finding over a figure that disproved it.
+    best_gross = max(gross)
+    if best_gross < 0.05:
+        headline = "Gross P&L is zero, so net P&L is exactly minus the cost"
+    else:
+        leader = labels[int(np.argmax(gross))]
+        headline = (
+            f"{leader} earns a real {best_gross:+.2f} bp gross — against a {cost:.1f} bp round trip"
+        )
+
+    fig.suptitle(
+        headline,
+        fontsize=11.5,
+        color=INK,
+        x=0.008,
+        ha="left",
+        y=1.03,
+        fontweight="bold",
+    )
+    fig.text(
+        0.008,
+        -0.02,
+        "Pooled out-of-sample months, one position at a time. Every model decides the "
+        f"direction of the same {best[models[0]]['n_trades']:,} trades, selected by the "
+        + (
+            "realized-variance gate"
+            if gate[0] == "rv"
+            else "trained gate"
+            if gate[0] == "trained"
+            else "no gate"
+        )
+        + (f" at the top {(1 - gate[1]) * 100:.0f}%." if gate[0] != "none" else "."),
+        fontsize=8,
+        color=MUTED,
+    )
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
-        "--weights",
-        default=None,
-        help="PatchTST checkpoint; omit to draw the tabular models only",
-    )
-    parser.add_argument("--bars-cache", help=".npz written by sequence_matrix.save_bars")
-    parser.add_argument(
-        "--label-mode",
-        default="triple_barrier",
-        choices=seq.LABEL_MODES,
-        help="ignored when --weights is given: the checkpoint's own recipe wins",
-    )
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--batch-size", type=int, default=2048)
+    parser.add_argument("--result", help="JSON written by `walkforward.py --out`")
+    parser.add_argument("--bars", help=".npz written by `sequence_matrix.save_bars`")
     parser.add_argument("--out", default=str(ASSETS))
-    parser.add_argument(
-        "--scores-cache",
-        default=None,
-        help="reuse/write the scored metrics as JSON, so restyling a figure does not "
-        "re-run 535k windows of inference",
-    )
     args = parser.parse_args()
+
+    if not (args.result or args.bars):
+        raise SystemExit("nothing to draw: pass --result, --bars, or both")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    cache = Path(args.scores_cache) if args.scores_cache else None
-    if cache is not None and cache.exists():
-        print(f"Reusing scores from {cache}")
-        data = json.loads(cache.read_text())
-    else:
-        if not args.bars_cache:
-            raise SystemExit("--bars-cache is required unless --scores-cache already exists")
-        weights = Path(args.weights) if args.weights else None
-        if weights is None:
-            print("No --weights given: drawing the tabular models only.")
-        print("Scoring every model on the held-out split ...")
-        data = compute(
-            weights, Path(args.bars_cache), args.device, args.batch_size, args.label_mode
-        )
-        if cache is not None:
-            cache.write_text(json.dumps(data, indent=2))
-            print(f"  scores cached to {cache}")
-
-    if args.bars_cache:
-        stats = figure_dataset(seq.load_bars(args.bars_cache), out / "dataset.png")
+    if args.bars:
+        stats = figure_dataset(seq.load_bars(args.bars), out / "dataset.png")
         print(f"  wrote {out / 'dataset.png'}")
+        # The README quotes these counts in its data table, so they are printed
+        # rather than only plotted — the table is copied from this line.
         print("  " + json.dumps(stats))
 
-    for name, fn in (
-        ("auc_comparison.png", figure_auc),
-        ("volatility_vs_direction.png", figure_decomposition),
-        ("residual_signal.png", figure_residual),
-    ):
-        fn(data, out / name)
-        print(f"  wrote {out / name}")
+    if args.result:
+        data = json.loads(Path(args.result).read_text())
+        for name, fn in (
+            ("economics.png", figure_economics),
+            ("walkforward_auc.png", figure_walkforward),
+            ("backtest.png", figure_backtest),
+        ):
+            fn(data, out / name)
+            print(f"  wrote {out / name}")
 
 
 if __name__ == "__main__":

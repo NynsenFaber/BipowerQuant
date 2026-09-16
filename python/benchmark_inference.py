@@ -161,13 +161,19 @@ def fit_tabular_baselines(
     seed: int = 42,
     threads: int = 1,
 ):
-    """Fit the two baselines exactly as `train_baseline.py` / `train_xgboost.py` do."""
+    """Fit the two tabular baselines: OFI-only logistic regression, and XGBoost.
+
+    Same hyperparameters `walkforward.py` fits its side models with, so the
+    latency measured here is the latency of the models the README reports.
+    """
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
-    # train_baseline.py uses the OFI column alone (index 3 of the 7-feature
-    # matrix), standardised — the raw columns span ~20 orders of magnitude.
+    # The linear control uses the OFI column alone (index 3 of the 7-feature
+    # matrix), standardised — the raw columns span ~20 orders of magnitude, and
+    # an unscaled logistic regression would be dominated by whichever one is
+    # largest rather than by whichever one is informative.
     logistic = make_pipeline(
         StandardScaler(), LogisticRegression(class_weight="balanced", max_iter=1000)
     )

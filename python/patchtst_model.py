@@ -356,7 +356,7 @@ class WindowBatcher:
         if pos == 0:
             raise ValueError(
                 "This split contains no positive windows — widen the time range "
-                "or lower FEE_THRESHOLD."
+                "or narrow the barrier."
             )
         return (len(self) - pos) / pos
 
@@ -502,11 +502,12 @@ def describe_checkpoint(payload: dict) -> str:
             f"data:    {data_meta.get('source', '?')} | {data_meta.get('n_bars', '?'):,} bars | "
             f"window {data_meta.get('window', '?')} | horizon {data_meta.get('horizon', '?')}"
         )
-        # Absent on checkpoints predating the switch, which is exactly when it
-        # matters most to say which target the weights were fitted against.
+        # Printed even when the keys are missing: a checkpoint that does not say
+        # which target it was fitted against is one you must not score, and
+        # "unrecorded" on this line is what makes that visible.
         lines.append(
-            f"label:   {data_meta.get('label_mode', 'fee_threshold (pre-triple-barrier)')} "
-            f"at +/-{data_meta.get('barrier', data_meta.get('fee_threshold', '?'))} | "
+            f"label:   {data_meta.get('label_mode', 'unrecorded')} "
+            f"at +/-{data_meta.get('barrier', '?')} | "
             f"channels {data_meta.get('channels', '?')}"
         )
     train_meta = payload.get("train_meta", {})

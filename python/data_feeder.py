@@ -1,81 +1,49 @@
+"""The shape of a raw Binance trades CSV, and one lazy reader over it.
+
+The archives at https://data.binance.vision are headerless, so nothing in the
+file says what its columns mean — the schema below *is* that knowledge, and it
+lives here so `sequence_matrix.py` and `backtest.py` cannot disagree about it.
+
+Everything here is deliberately thin. Folding trades into 1-second bars is
+`sequence_matrix.load_second_bars`'s job, and pricing them is `backtest.py`'s;
+this module only opens the file.
+"""
+
+from __future__ import annotations
+
 import polars as pl
 
-# 1. Define Binance public trade data columns with explicit data types
-# This acts as the schema parser for the headerless CSV file
+# Column order is fixed by the archive format, not chosen here. Types are given
+# explicitly because Polars' inference would read `trade_id` as Int64 on one
+# month and Float64 on another depending on where the values happen to land,
+# which silently changes the dtype of every downstream array.
 CSV_SCHEMA = {
-    "trade_id": pl.Int64,  # Unique transaction identifier
-    "price": pl.Float64,  # Execution price in USDT
-    "qty": pl.Float64,  # Amount of BTC traded
-    "quote_qty": pl.Float64,  # Total value of the trade in USDT (price * qty)
-    "time": pl.Int64,  # Unix timestamp in milliseconds or microseconds
-    "is_buyer_maker": pl.Boolean,  # True = Sell pressure, False = Buy pressure
-    "is_best_match": pl.Boolean,  # Legacy routing field (can be ignored)
+    "trade_id": pl.Int64,  # unique transaction identifier
+    "price": pl.Float64,  # execution price in USDT
+    "qty": pl.Float64,  # amount of BTC traded
+    "quote_qty": pl.Float64,  # value of the trade in USDT (price * qty)
+    "time": pl.Int64,  # Unix timestamp; milliseconds in some months, micro in others
+    "is_buyer_maker": pl.Boolean,  # True = the taker was selling, so sell pressure
+    "is_best_match": pl.Boolean,  # legacy routing field, unused
 }
 
+# The month the scripts read when no `--csv` is given. A default, not a constant:
+# every entry point takes a path.
 FILE_PATH = "../data/BTCUSDT-trades-2026-05.csv"
 
 
-def get_lazy_feeder(path: str):
+def get_lazy_feeder(path: str) -> pl.LazyFrame:
+    """A lazy scan of one monthly archive, with `time` cast to a datetime.
+
+    Lazy rather than eager because a single month is ~9 GB of CSV: returning a
+    `LazyFrame` lets the caller push its filters and aggregations *into* the scan,
+    so Polars reads only the columns and rows that survive them. Collecting this
+    without narrowing it first will exhaust memory, which is what
+    `sequence_matrix.py`'s batched reader exists to avoid.
+
+    Note the cast assumes microseconds. `sequence_matrix._time_divisor` is what
+    detects the unit per file; callers that need that robustness go through it.
     """
-    Initializes a lazy execution graph using Polars out-of-core capabilities.
-    """
-    return (
-        pl.scan_csv(path, has_header=False, schema=CSV_SCHEMA)
-        # Cast the time integer column straight into a microsecond Datetime object
-        .with_columns(pl.col("time").cast(pl.Datetime("us")))
+    return pl.scan_csv(path, has_header=False, schema=CSV_SCHEMA).with_columns(
+        pl.col("time").cast(pl.Datetime("us"))
     )
-
-
-def stream_hourly_chunks(lazy_df, chunk_hours: int = 1):
-    """
-    Streams data out-of-core by processing it in time-based chunks.
-    This guarantees your system RAM stays stable.
-    """
-    # 1. Collect only the min/max time first
-    time_bounds = lazy_df.select(
-        [pl.col("time").min().alias("min_time"), pl.col("time").max().alias("max_time")]
-    ).collect()
-
-    start_time = time_bounds["min_time"][0]
-    end_time = time_bounds["max_time"][0]
-
-    print(f"Data ranges from {start_time} to {end_time}")
-
-    current_start = start_time
-    # Advance window by our chunk size (e.g., 1 hour)
-    step = pl.duration(hours=chunk_hours)
-
-    while current_start < end_time:
-        current_end = current_start + step
-
-        # 2. Define the chunk via filter expressions (Lazy evaluation)
-        chunk_lazy = lazy_df.filter(
-            (pl.col("time") >= current_start) & (pl.col("time") < current_end)
-        )
-
-        # 3. Trigger execution only for this specific chunk
-        chunk_df = chunk_lazy.collect()
-
-        if len(chunk_df) > 0:
-            yield chunk_df
-
-        current_start = current_end
-
-
-# --- Validation Validation Test ---
-if __name__ == "__main__":
-    print("Initializing lazy data connection...")
-    lazy_pipeline = get_lazy_feeder(FILE_PATH)
-
-    print("Starting out-of-core streaming test...")
-    # Test stream with 1-hour chunks
-    feeder = stream_hourly_chunks(lazy_pipeline, chunk_hours=1)
-
-    # Grab just the first 1-hour chunk to validate
-    try:
-        first_hour_chunk = next(feeder)
-        print("✅ Success! First 1-hour chunk collected.")
-        print(f"Rows in this chunk: {len(first_hour_chunk):,}")
-        print(first_hour_chunk.head(5))
-    except StopIteration:
-        print("❌ No data found or file path is incorrect.")

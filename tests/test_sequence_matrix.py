@@ -166,16 +166,6 @@ def test_gate_is_the_union_of_the_two_side_classes(bars):
     np.testing.assert_array_equal(gate_y.astype(bool) & gate_usable, side_usable)
 
 
-def test_fee_threshold_mode_is_a_forward_return_comparison(bars):
-    y, usable = seq.build_targets(bars, horizon=30, barrier=0.0005, label_mode="fee_threshold")
-    price = bars["price"]
-    expected = (price[30:] / price[:-30] - 1.0) > 0.0005
-
-    np.testing.assert_array_equal(y[:-30].astype(bool), expected)
-    assert np.all(usable[:-30])
-    assert not np.any(usable[-30:])
-
-
 def test_unknown_label_mode_is_rejected(bars):
     with pytest.raises(ValueError, match="label_mode"):
         seq.build_targets(bars, label_mode="nonsense")

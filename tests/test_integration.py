@@ -5,7 +5,7 @@ only tests that exercise how the pieces are wired together rather than what each
 piece computes. That distinction is not academic: the `train_folds` signature
 regression these tests now cover passed every unit test in the suite and still
 took the whole training run down on the first call, because nothing had ever
-invoked it the way `train_patchtst_local.py` does.
+invoked it the way its callers do — with `on_fold_complete` passed in.
 
 Configurations are deliberately degenerate in size (2 encoder layers, 32-bar
 lookback, 2 epochs). A test that reproduced a published number would need the
@@ -109,7 +109,7 @@ def test_train_folds_scores_every_test_window(fold_bars):
 
 
 def test_train_folds_reports_metadata_the_callers_read(fold_bars):
-    """`train_patchtst_local.py` prints these keys and writes them to JSON."""
+    """The Colab notebook prints these keys and writes them alongside the weights."""
     _, meta = pf.train_folds(
         fold_bars,
         two_folds(),
@@ -141,8 +141,8 @@ def test_on_fold_complete_fires_once_per_fold_with_that_folds_probabilities(fold
     """The crash-safety hook: a fold's work must be persistable as soon as it ends.
 
     A regression test for a real failure — the callback was documented and passed
-    by `train_patchtst_local.py` but not accepted by `train_folds`, so every run
-    died at the first fold boundary with a TypeError.
+    by the training driver but not accepted by `train_folds`, so every run died
+    at the first fold boundary with a TypeError.
     """
     seen: list[tuple[str, np.ndarray]] = []
     folds = two_folds()

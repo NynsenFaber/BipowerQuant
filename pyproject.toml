@@ -14,9 +14,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Notebook tooling: needed to open `exploratory.ipynb` and the Colab driver, and
-# by nothing that runs in CI. Kept out of the default install so a test run does
-# not pull the whole Jupyter stack. Restore with `uv sync --extra notebook`.
+# Notebook tooling: needed only to open `notebooks/train_patchtst_colab.ipynb`
+# locally, and by nothing that runs in CI. Kept out of the default install so a
+# test run does not pull the whole Jupyter stack. Add with
+# `uv sync --extra notebook`.
 notebook = [
     "ipykernel>=7.3.0",
     "jupyter>=1.1.1",
@@ -70,12 +71,9 @@ omit = [
     # Figure generation is plotting code: it is checked by eye against the result
     # file it renders, and importing matplotlib under coverage buys nothing.
     "python/make_figures.py",
-    "python/make_walkforward_figures.py",
     # Entry points whose logic lives in the modules they drive.
-    "python/train_*.py",
     "python/benchmark_inference.py",
     "python/sweep_barriers.py",
-    "python/eval_patchtst.py",
 ]
 
 [tool.coverage.report]
@@ -120,17 +118,14 @@ ignore = [
 # `import backtest` above `import numpy` and hiding which imports are ours.
 known-first-party = [
     "backtest", "benchmark_inference", "bipower_core", "data_feeder",
-    "eval_patchtst", "make_figures", "make_walkforward_figures", "ml_matrix",
-    "patchtst_folds", "patchtst_model", "patchtst_train", "sequence_matrix",
-    "sweep_barriers", "train_baseline", "train_patchtst_local", "train_xgboost",
-    "walkforward",
+    "make_figures", "ml_matrix", "patchtst_folds", "patchtst_model",
+    "patchtst_train", "sequence_matrix", "sweep_barriers", "walkforward",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Import order in these three is load-bearing, not stylistic: on macOS, xgboost
+# Import order in these two is load-bearing, not stylistic: on macOS, xgboost
 # must be imported before torch or the process segfaults, and no amount of
 # `noqa` on individual lines survives an automatic re-sort of the block.
 # `benchmark_inference.py` documents the measured failure matrix.
 "python/benchmark_inference.py" = ["I001", "E402"]
-"python/make_figures.py" = ["I001", "E402"]
 "tests/conftest.py" = ["I001", "E402"]

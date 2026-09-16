@@ -1,20 +1,35 @@
-"""
-Sequence dataset builder for the PatchTST baseline.
+"""The shared foundation: raw CSV -> 1-second bars -> windows, labels, channels.
 
-The tabular models (`train_baseline.py`, `train_xgboost.py`) collapse each
-5-minute lookback window into 7 scalars via the C++ engine. PatchTST instead
-consumes the *raw sequence*: the same 300 one-second bars, as M parallel
-univariate channels, patched into tokens.
+**Everything downstream reads its data through this module**, which is the point.
+The tabular models collapse each 5-minute lookback window into 7 scalars; PatchTST
+consumes the *raw sequence*, the same 300 one-second bars as parallel univariate
+channels. Because both take the bar grid, the window starts and the labels from
+here, the two approaches are provably solving the identical problem on the
+identical windows — which is what makes the comparison in README §5 a comparison
+of models rather than of preprocessing.
 
-This module therefore deliberately depends on nothing but Polars and NumPy —
-no `bipower_core`, no torch — so the exact same code runs inside a Google Colab
-runtime (where the C++ extension is not compiled) and locally.
+Four things live here, in this order:
+
+1. **Ingestion** (`load_second_bars`) — ticks folded into a complete 1-second
+   grid, plus `save_bars` / `load_bars` / `concat_bars` for caching and splicing.
+2. **Features** (`build_channels`, `build_tabular_features`) — the per-bar
+   channels PatchTST reads, and the 7 window statistics the tabular models read.
+3. **Labels** (`triple_barrier`, `build_targets`) — the vectorised triple barrier,
+   and the two questions derived from it (which side, and whether either side).
+4. **Splits** (`valid_window_starts`, `chronological_split`, `SequenceDataset`) —
+   purged chronological splits, so training never sees its own test period.
+
+This module deliberately depends on nothing but Polars and NumPy — no
+`bipower_core`, no torch — so the exact same code runs inside a Google Colab
+runtime, where the C++ extension is not compiled, as it does locally.
 
 Bars are placed on a **complete** 1-second grid (empty seconds carry a
 forward-filled price and zero volume), so a "60-bar" horizon is always literally
-60 seconds. On BTC/USDT ~15% of seconds contain no trade at all, so a builder
+60 seconds. On BTC/USDT ~11% of seconds contain no trade at all, so a builder
 that emits bars only for traded seconds — as `ml_matrix.py` originally did —
-gives a horizon of an arbitrary wall-clock length.
+gives a horizon of an arbitrary wall-clock length. Since the vertical barrier
+*is* the horizon, that would make the label itself depend on how busy the market
+happened to be.
 """
 
 from __future__ import annotations
@@ -58,13 +73,6 @@ from data_feeder import CSV_SCHEMA
 # before the grid was run, and re-picking afterwards is how a target gets fitted.
 BARRIER = 0.0060
 HORIZON = 3600
-
-# Legacy alias. The original target was `forward_return > FEE_THRESHOLD`, which
-# is retained under `label_mode="fee_threshold"` so old checkpoints still score.
-# Pinned at its historical 5 bp: those checkpoints were trained against that
-# number, and following `BARRIER` here would silently rescore them on a target
-# they never saw.
-FEE_THRESHOLD = 0.0005
 
 # 5-minute lookback window, in 1-second bars. This is PatchTST's sequence length L.
 # Unchanged when the horizon moved, so that the only difference between the old
@@ -345,7 +353,7 @@ def load_second_bars(
     Args:
         csv_path: path to the decompressed Binance `*-trades-*.csv`.
         hours: keep only the first N hours of the file (None = the whole file).
-            `hours=8` reproduces the window population `train_xgboost.py` used.
+            Mainly for quick experiments; the study reads whole months.
         skip_hours: drop this many hours from the start before applying `hours`.
         streaming: use the Polars streaming engine (`engine="lazy"` only).
         chunk_hours: if set, aggregate in slices of this many hours instead of a
@@ -592,8 +600,8 @@ def build_tabular_features(
     # direct summation. That is invisible in the features and just visible in the
     # result: XGBoost's split decisions amplify it into ~0.002 of test AUC, well
     # inside the bootstrap interval but enough that this path and `ml_matrix.py`
-    # print different third decimals. `train_xgboost.py` (the C++ path) is the
-    # one the README quotes.
+    # print different third decimals. This NumPy path is the one `walkforward.py`
+    # runs, so it is the one the README quotes; `ml_matrix.py` exists to check it.
     return np.column_stack(
         (
             realized_variance,
@@ -626,7 +634,10 @@ def rolling_realized_variance(
     return cumulative[starts + window] - cumulative[starts + 1]
 
 
-LABEL_MODES = ("triple_barrier", "barrier_touched", "fee_threshold")
+# The two questions the project asks, and the only two labels it builds. They
+# come from the *same* triple-barrier pass: the side label reads which barrier
+# was touched, the gate label reads whether either was.
+LABEL_MODES = ("triple_barrier", "barrier_touched")
 
 
 def triple_barrier(
@@ -710,19 +721,13 @@ def build_targets(
     subset. This is the volatility question, and it is deliberately the easy one —
     pairing a gate that predicts *whether* a window is tradeable with a side model
     that predicts *which way* is what lets the pair be evaluated on the whole
-    population instead of on a subset chosen with hindsight. See `metalabel.py`.
-
-    `label_mode="fee_threshold"` is the original target, `forward_return >
-    FEE_THRESHOLD` (5 bp). It is a **compound event** — a large move happened *and*
-    it went up — and the first conjunct is far easier to forecast than the second,
-    so a model optimising it drifts into predicting volatility. Kept only so
-    checkpoints trained against it still reproduce their published numbers.
+    population instead of on a subset chosen with hindsight. `walkforward.py` is
+    what fits the pair and scores them together.
 
     Entries within `horizon` of the end are never usable; no window returned by
     `valid_window_starts` labels against them in any case.
     """
     price = bars["price"]
-    n = price.size
 
     if label_mode == "triple_barrier":
         side, _, defined = triple_barrier(price, horizon=horizon, barrier=barrier)
@@ -731,15 +736,6 @@ def build_targets(
     if label_mode == "barrier_touched":
         side, _, defined = triple_barrier(price, horizon=horizon, barrier=barrier)
         return (side != 0).astype(np.int8), defined
-
-    if label_mode == "fee_threshold":
-        y = np.zeros(n, dtype=np.int8)
-        usable = np.zeros(n, dtype=bool)
-        if n > horizon:
-            forward_return = price[horizon:] / price[:-horizon] - 1.0
-            y[:-horizon] = (forward_return > barrier).astype(np.int8)
-            usable[:-horizon] = True
-        return y, usable
 
     raise ValueError(f"label_mode must be one of {LABEL_MODES}, got {label_mode!r}")
 
@@ -976,19 +972,16 @@ def dataset_kwargs_from(data_meta: dict) -> dict:
     """Recover the dataset recipe a checkpoint recorded, for `build_sequence_dataset`.
 
     Every consumer of a checkpoint needs this, and getting a default wrong here
-    means silently scoring a model against a window population it never saw.
-
-    The two defaults doing real work are for checkpoints written before the
-    triple-barrier switch: they carry no `label_mode`, so they fall back to the
-    `fee_threshold` target they were actually trained on, and their `channels`
-    list restores the 6-channel layout. Both keep old weights reproducing their
-    published numbers instead of being scored against a label they never saw.
+    means silently scoring a model against a window population it never saw — a
+    failure with no symptom, since the wrong population still produces a number.
+    Every default below is therefore this module's own current default, so a key
+    the checkpoint omitted resolves to what the code would have used anyway.
     """
     return {
         "window": data_meta.get("window", WINDOW_SIZE),
         "horizon": data_meta.get("horizon", HORIZON),
-        "barrier": data_meta.get("barrier", data_meta.get("fee_threshold", BARRIER)),
-        "label_mode": data_meta.get("label_mode", "fee_threshold"),
+        "barrier": data_meta.get("barrier", BARRIER),
+        "label_mode": data_meta.get("label_mode", "triple_barrier"),
         "channel_set": data_meta.get("channels", DEFAULT_CHANNEL_SET),
         "train_frac": data_meta.get("train_frac", 0.7),
         "val_frac": data_meta.get("val_frac", 0.1),
@@ -1167,44 +1160,3 @@ def load_or_build_bars(
     if cache is not None:
         save_bars(bars, cache)
     return bars
-
-
-def build_from_csv(
-    csv_path: str | Path,
-    hours: float | None = None,
-    skip_hours: float = 0.0,
-    cache: str | Path | None = None,
-    **dataset_kwargs,
-) -> SequenceDataset:
-    """One-shot CSV -> dataset, reusing `cache` when it covers the same slice."""
-    bars = load_or_build_bars(csv_path, hours=hours, skip_hours=skip_hours, cache=cache)
-    return build_sequence_dataset(bars, **dataset_kwargs)
-
-
-if __name__ == "__main__":
-    import argparse
-
-    from data_feeder import FILE_PATH
-
-    parser = argparse.ArgumentParser(description="Smoke-test the sequence builder.")
-    parser.add_argument("--csv", default=FILE_PATH)
-    parser.add_argument("--hours", type=float, default=8.0)
-    parser.add_argument("--cache", default=None, help="optional .npz bar cache")
-    parser.add_argument("--label-mode", default="triple_barrier", choices=LABEL_MODES)
-    parser.add_argument("--channels", default=DEFAULT_CHANNEL_SET, choices=sorted(CHANNEL_SETS))
-    args = parser.parse_args()
-
-    print(f"Streaming {args.hours} hours from {args.csv} ...")
-    dataset = build_from_csv(
-        args.csv,
-        hours=args.hours,
-        cache=args.cache,
-        label_mode=args.label_mode,
-        channel_set=args.channels,
-    )
-    print("✅ Sequence dataset built")
-    print(dataset.summary())
-    print(
-        f"empty (trade-less) seconds filled: {dataset.meta['empty_seconds']:,} "
-        f"of {dataset.meta['n_bars']:,}"
-    )

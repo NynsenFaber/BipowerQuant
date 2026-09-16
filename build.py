@@ -6,7 +6,7 @@
     python build.py --debug      # unoptimised, with assertions
 
 This replaces the shell script it grew out of, because CI builds the same module
-on Windows and `build.sh` could not. Three portability details it exists to
+on Windows and a bash wrapper could not. Three portability details it exists to
 handle, each of which silently produces a broken or missing module rather than
 an error:
 

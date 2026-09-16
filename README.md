@@ -11,7 +11,7 @@ This repository is a careful attempt at that question on **six months of tick-le
 data** (742 million individual trades). It builds two very different kinds of model on
 exactly the same data and compares: a **feature-based** approach, where
 handcrafted statistics from stochastic calculus are fed to standard machine learning, and a
-**deep learnin** approach, where a Transformer reads the raw price in sequence.
+**deep learning** approach, where a Transformer reads the raw price in sequence.
 
 The short version of what it found:
 
@@ -22,8 +22,8 @@ The short version of what it found:
 * Predicting **which way** is far harder. The feature-based models get essentially nowhere.
 * The Transformer is the one model that consistently makes money before costs: **+2.9 basis
   points per trade** (a basis point is one hundredth of a percent), and it beats every
-  feature-based model in **6 of 7** configurations tested. 
-* The model predictive edge does not yet cover trading fees. It gets **56% of the way** there, which is a real result, and a very different situation from having no signal at all.
+  feature-based model in **6 of 7** configurations tested.
+* The model's predictive edge does not yet cover trading fees. It gets **56% of the way** there, which is a real result, and a very different situation from having no signal at all.
 
 Everything below explains what those statements mean and how they were measured. A full
 plain-language glossary is at the end; every trading term is defined there.
@@ -85,12 +85,12 @@ round-trip cost, the expected profit per trade is
 
 $$\mathbb{E}[\text{P\&L}] = \rho\,\bar G\,(2h-1) - c$$
 
-where $h$ is the **hit rate** (how often the predicted direction is the one that happens) and $2h -1$ is the **expected direction** as we win with probability $h$ and loose with probability $1-h$.
+where $h$ is the **hit rate** (how often the predicted direction is the one that happens) and $2h-1$ is the **expected direction**, since we win with probability $h$ and lose with probability $1-h$.
 Setting this to zero gives the number that matters:
 
 $$h^{*} = \frac{1}{2}\left(1 + \frac{c}{\rho\,\bar G}\right)$$
 
-$h^{*}$ is the accuracy a model must reach for the strategy to break even. Note that without a round-trip cost is sufficient to win half of the times.
+$h^{*}$ is the accuracy a model must reach for the strategy to break even. Note that with no round-trip cost ($c = 0$) it collapses to $h^{*} = 0.5$: winning half the time would be enough. Every basis point of cost raises the bar from there.
 
 ![What a target has to be worth](assets/economics.png)
 
@@ -125,7 +125,7 @@ The 5.15 bp round trip breaks down as follows, per side:
 | Slippage | 0.076 bp | measured from the tape |
 | Half-spread | 0.001 bp | measured (Roll estimator, tick-size floor) |
 
-**Slippage:** is the gap between the price you expect and the price you get and it is measured
+**Slippage** is the gap between the price you expect and the price you get, and it is measured
 rather than assumed. Across 45,697 qualifying runs it comes to 0.076 bp on average.
 
 One caveat worth keeping in mind while reading every profit figure below: **the exchange fee
@@ -314,7 +314,8 @@ normalisation erases *how* volatile the window was (genuinely useful information
 discarded mean and standard deviation are standardised and fed back in near the output layer,
 recovering the best of both.
 
-In contrast to standard PatchTST that is a time series prediction, the output is a single number (we use the model as a binary classificator).
+Standard PatchTST forecasts a time series; here the head is replaced by one that emits a
+single logit, so the model is used as a binary classifier.
 
 ### 3.4 What the sequence approach costs
 
@@ -580,7 +581,7 @@ Polars, NumPy and PyTorch and runs without it, which is what lets the same code 
 
 ```bash
 uv sync --group test
-uv run pytest                 # 260 tests, ~4 seconds
+uv run pytest                 # 259 tests, ~4 seconds
 uv run pytest -m "not slow"   # skip the ones that fit models
 ```
 
@@ -625,7 +626,8 @@ python walkforward.py --bars ../data/bars_6m.npz --train-stride 5 \
                       --patchtst-probs ../weights/patchtst_probs.npz \
                       --out ../data/wf_final.json
 
-python make_walkforward_figures.py --result ../data/wf_final.json
+# redraw every figure in this README from that run and the bar cache
+python make_figures.py --result ../data/wf_final.json --bars ../data/bars_6m.npz
 ```
 
 Useful flags: `--entry maker` for passive execution, `--taker-fee-bps` to test a different
@@ -656,8 +658,28 @@ probabilities.
 | Tabular models | XGBoost, scikit-learn | the gate, the seven-feature side model, the linear control |
 | Sequence model | PyTorch | PatchTST, trained per fold on a Colab GPU |
 | Backtest | NumPy | fees, spread, slippage, queue position, non-overlapping positions |
-| Tests | pytest + coverage | 260 tests on synthetic data, ~4 s, 87% of the library |
+| Tests | pytest + coverage | 259 tests on synthetic data, ~4 s, 88% of the library |
 | CI | GitHub Actions | builds the extension and runs the suite on Linux, macOS and Windows |
+
+### Reading the code
+
+`python/` is a flat directory of modules rather than an installed package. If you
+are reading it for the first time, this is the order that builds up:
+
+| # | File | What it owns |
+| ---: | :--- | :--- |
+| 1 | `sequence_matrix.py` | the foundation: ticks → 1-second bars → windows, labels, features, purged splits. **Everything downstream reads its data through here**, which is what makes the two model families provably comparable |
+| 2 | `backtest.py` | the cost model and the simulator: fees, spread, slippage, queue fills, non-overlapping positions, and the break-even identity `h*` |
+| 3 | `sweep_barriers.py` | §1's argument as code: why 60 bp over one hour, chosen on training months alone |
+| 4 | `walkforward.py` | the fold schedule, the gate and side models, and the backtest grid. This is what produces every number in §5 |
+| 5 | `patchtst_model.py` | the network: patching, attention, the scale-feature head, checkpoint I/O |
+| 6 | `patchtst_train.py` | the training loop: class weighting, warmup + cosine, mixed precision, early stopping |
+| 7 | `patchtst_folds.py` | one PatchTST per fold, with the time budget that picks the stride |
+| 8 | `ml_matrix.py` | the C++ feature path, kept as an independent cross-check of the NumPy one |
+| 9 | `make_figures.py` | every figure above, redrawn from a result file |
+
+`benchmark_inference.py` produces the latency table in §3.4 and `data_feeder.py`
+holds the CSV schema; neither is on the critical path.
 
 Two implementation notes that are load-bearing rather than incidental:
 

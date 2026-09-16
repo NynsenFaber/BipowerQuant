@@ -145,10 +145,10 @@ jobs:
 
       # `--only-group lint` installs ruff and nothing else — linting does not need
       # torch, and pulling it here would triple the job for no benefit.
-      #
-      # Lint only, not `ruff format --check`. This codebase is hand-formatted to
-      # keep related columns aligned and docstrings readable as prose, and the
-      # formatter would rewrite 27 of 29 files — a diff that buries every real
-      # change under whitespace without catching a single bug.
-      - name: Ruff
+      - name: Ruff lint
         run: uv run --only-group lint ruff check --output-format=github .
+
+      # Checked rather than applied: CI reports, it does not rewrite the branch.
+      # Run `ruff format .` locally to fix anything this flags.
+      - name: Ruff format
+        run: uv run --only-group lint ruff format --check --diff .

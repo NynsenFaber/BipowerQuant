@@ -1,11 +1,31 @@
-"""
-Training loop for the PatchTST classifier.
+"""Training loop for the PatchTST classifier.
 
 Kept out of the notebook on purpose: the notebook is a thin driver that sets
 knobs and calls `fit`, so the logic that produced a checkpoint is version
 controlled next to the model rather than pasted into a cell.
 
 Nothing here is Colab-specific — the same `fit` runs on CPU, it is just slow.
+
+`fit` is an ordinary supervised loop with four things bolted on, each earning its
+place on this problem:
+
+* **Class weighting** (`pos_weight`). The two barrier classes are close to
+  balanced, but not exactly, and the imbalance drifts month to month. Weighting
+  the loss by `n_negative / n_positive` stops the model from buying accuracy by
+  leaning on whichever side was more common in that fold's training months.
+* **Warmup then cosine decay** (`_cosine_schedule`). Attention blocks are
+  unstable in the first few hundred steps at full learning rate; warmup walks the
+  rate up from zero, and the cosine tail anneals it rather than stopping abruptly.
+* **Mixed precision** (`_amp_setup`). Roughly doubles throughput on a GPU, which
+  on a fixed time budget means the model sees roughly twice the windows.
+* **Early stopping on validation ROC-AUC, with best-weight restore.** The
+  returned model is the best *validating* epoch, not the last one. Overlapping
+  windows make this model quick to memorise its training split, so the last epoch
+  is usually not the best one.
+
+The one thing `fit` will not do is pick its own data. Splits, purging and strides
+are `sequence_matrix.py`'s and `patchtst_folds.py`'s job, so a leak cannot be
+introduced here.
 """
 
 from __future__ import annotations
@@ -273,25 +293,21 @@ def fit(
         running, seen = 0.0, 0
 
         for x, y in train_batcher.iter_batches(cfg.batch_size, shuffle=True, generator=generator):
-            optimizer.zero_grad(set_to_none=True)
-            if amp_dtype is not None:
-                with torch.autocast(device_type=device.type, dtype=amp_dtype):
-                    loss = criterion(model(x), y)
-            else:
-                loss = criterion(model(x), y)
-
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-                optimizer.step()
-            scheduler.step()
-
+            loss = _training_step(
+                model,
+                x,
+                y,
+                criterion,
+                optimizer,
+                scheduler,
+                amp_dtype,
+                scaler,
+                cfg.grad_clip,
+                device,
+            )
+            # `.item()` forces a host sync, so the loop runs no further ahead of
+            # the device than one batch. `estimate_throughput` pays the same cost
+            # deliberately, which is what keeps its projection honest.
             running += loss.item() * y.numel()
             seen += y.numel()
 
